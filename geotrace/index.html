@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GeoTel | Field Verification</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <div class="brand">
+        <span style="display:inline-flex; width:34px; height:34px; border-radius:12px; background:rgba(124,58,237,.25); border:1px solid rgba(124,58,237,.55); align-items:center; justify-content:center; font-weight:900;">SC</span>
+        <div>
+          <div style="font-size:14px; font-weight:900;">GeoTel</div>
+          <div class="muted small">Field verification, documentation, and billing control</div>
+          <div class="muted small">by <b>Spec Communications, LLC</b></div>
+        </div>
+      </div>
+      <div class="row">
+        <span id="whoami" class="badge">Not signed in</span>
+        <button id="btnSignOut" class="btn secondary" style="display:none;">Sign out</button>
+      </div>
+    </div>
+
+    <div style="height:16px"></div>
+
+    <div id="viewAuth" class="grid cols-2">
+      <div class="card">
+        <h1>Sign in to GeoTel (starter)</h1>
+        <p class="muted">This starter supports Supabase Auth if you wire your keys. If not, it runs in demo mode so you can click around.</p>
+
+        <div class="hr"></div>
+
+        <div class="row">
+          <input id="email" class="input" placeholder="email" />
+          <input id="password" class="input" placeholder="password" type="password" />
+        </div>
+        <div class="row" style="margin-top:12px;">
+          <button id="btnSignIn" class="btn">Sign in</button>
+          <button id="btnMagicLink" class="btn secondary">Send magic link</button>
+          <button id="btnSignUp" class="btn secondary">Create user</button>
+          <button id="btnDemo" class="btn ghost">Use demo</button>
+        </div>
+
+        <div class="note" style="margin-top:14px;">
+          <div style="font-weight:900;">Roles in this build</div>
+          <div class="muted small">TDS -> PRIME -> SUB -> SPLICER -> OWNER (Spec Communications, LLC Louis Garcia)</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>What you'll see in the demo</h2>
+        <ul class="muted">
+          <li><b>Inventory checklist</b> with item photos (example Millennium item included).</li>
+          <li><b>Node workflow</b>: enter node number, then work one node at a time.</li>
+          <li><b>Splice locations</b>: GPS capture + photo + timestamp required before "Complete".</li>
+          <li><b>Units threshold alert</b>: when used units approach allowed units, PRIME gets warned.</li>
+          <li><b>Pricing privacy</b>: prices are hidden from SPLICERS (and can be hidden between other parties via RLS).</li>
+        </ul>
+        <div class="hr"></div>
+        <div class="muted small">
+          Tip: Once Supabase is wired, this becomes real: files upload to Storage, rows land in Postgres, and policies enforce who can see what.
+        </div>
+      </div>
+    </div>
+
+    <div id="viewApp" style="display:none;" class="grid cols-2">
+      <div class="card">
+        <h1>Node workspace</h1>
+
+        <div class="row" style="margin-bottom:12px;">
+          <select id="projectSelect" class="input">
+            <option value="">Select project</option>
+          </select>
+          <span id="projectMeta" class="muted small"></span>
+          <button id="btnSeedDemo" class="btn ghost" style="display:none;">Load Demo Node (NODE 11)</button>
+        </div>
+
+        <div class="row">
+          <input id="nodeNumber" class="input" placeholder="Enter node number (example: NODE-1001)" />
+          <button id="btnOpenNode" class="btn">Open node</button>
+          <button id="btnNewNode" class="btn secondary">Create node</button>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="kpi">
+          <div class="tile">
+            <div class="label">Node</div>
+            <div id="kpiNode" class="value">None</div>
+          </div>
+          <div class="tile">
+            <div class="label">Completion</div>
+            <div id="kpiCompletion" class="value">0%</div>
+          </div>
+          <div class="tile">
+            <div class="label">Units</div>
+            <div id="kpiUnits" class="value">0 / 0</div>
+          </div>
+        </div>
+
+        <div style="margin-top:14px;" class="row">
+          <span id="chipStatus" class="chip"><span class="dot warn"></span><span>Waiting</span></span>
+          <span id="chipRole" class="chip"><span class="dot ok"></span><span>Role: ?</span></span>
+          <span id="chipPricing" class="chip"><span class="dot bad"></span><span>Pricing hidden from splicers</span></span>
+        </div>
+
+        <div class="hr"></div>
+
+        <h2>Splice locations</h2>
+        <p class="muted small">Each location must have: GPS + photo + timestamp before billing can occur.</p>
+
+        <div class="row">
+          <button id="btnAddLocation" class="btn secondary">Add splice location</button>
+          <button id="btnCaptureGPS" class="btn ghost">Capture GPS</button>
+          <input id="photoFile" type="file" accept="image/*" />
+          <button id="btnAttachPhoto" class="btn">Attach photo</button>
+        </div>
+
+        <div id="locations" style="margin-top:12px;"></div>
+
+        <div class="hr"></div>
+
+        <h2>Inventory checklist</h2>
+        <p class="muted small">What was used at this node (with item photo reference). Splicers see items and checklists, not pricing.</p>
+        <div class="row" style="margin-top:8px;">
+          <button id="btnCaptureProof" class="btn secondary">Capture proof photo</button>
+          <input id="proofPhotoFile" type="file" accept="image/*" capture="environment" />
+          <span id="proofStatus" class="muted small">No proof photo captured</span>
+        </div>
+        <div id="inventory" style="margin-top:12px;"></div>
+
+        <div class="hr"></div>
+
+        <div class="row">
+          <button id="btnMarkNodeReady" class="btn">Mark node READY for billing</button>
+          <button id="btnCreateInvoice" class="btn secondary">Create invoice (role-based)</button>
+        </div>
+
+        <div id="readyNote" class="note" style="margin-top:12px; display:none;"></div>
+      </div>
+
+      <div class="card">
+        <h2>Invoices and privacy</h2>
+        <div class="muted small">
+          This panel shows what <b>you</b> can see based on your role.
+          In Supabase, RLS policies enforce this server-side.
+        </div>
+
+        <div class="hr"></div>
+
+        <div id="invoicePanel"></div>
+
+        <div class="hr"></div>
+
+        <h2>Admin notes</h2>
+        <div class="note">
+          <div style="font-weight:900;">Next build steps</div>
+          <ol class="muted small" style="margin-top:8px;">
+            <li>Wire Supabase keys in Netlify env vars.</li>
+            <li>Run the SQL schema + RLS in Supabase.</li>
+            <li>Enable Storage bucket for photos (private).</li>
+            <li>Add real node sheets import and Millennium part lookup.</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div><b>GeoTel</b> -> by <b>Spec Communications, LLC</b></div>
+      <div>A product of <b>Fatanett, LLC</b></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast">
+    <div id="toastTitle" class="title">Notice</div>
+    <div id="toastBody" class="body"></div>
+  </div>
+
+  <script src="./env.generated.js"></script>
+  <script type="module" src="./supabaseClient.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+[build]
+  publish = "."
+  command = "node ./netlify-write-env.mjs || true"
+
+# Optional: basic headers
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
