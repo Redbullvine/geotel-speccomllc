@@ -530,22 +530,6 @@ using (
 );
 
 -- Helper: billing readiness view
-create or replace view public.node_billing_ready as
-select
-  n.id,
-  n.node_number,
-  n.allowed_units,
-  n.used_units,
-  n.ready_for_billing,
-  (select bool_and(sl.completed) from public.splice_locations sl where sl.node_id = n.id) as all_splice_locations_complete,
-  (select bool_and(sl.photo_path is not null and sl.gps_lat is not null and sl.taken_at is not null)
-   from public.splice_locations sl where sl.node_id = n.id) as all_splice_proof_complete,
-  (select bool_and(ni.completed) from public.node_inventory ni where ni.node_id = n.id) as all_inventory_complete,
-  (select bool_and(
-     coalesce(ue.proof_required, true) = false
-     or (ue.photo_path is not null and ue.gps_lat is not null and ue.captured_at_server is not null)
-   ) from public.usage_events ue where ue.node_id = n.id) as all_usage_proof_complete
-from public.nodes n;
 
 -- 7) Orgs + membership (pricing visibility)
 create table if not exists public.orgs (
@@ -632,8 +616,17 @@ create table if not exists public.allowed_quantities (
   created_at timestamptz not null default now()
 );
 
-alter table public.allowed_quantities
-  add constraint if not exists allowed_quantities_unique unique (node_id, unit_type_id);
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'allowed_quantities_unique'
+      and conrelid = 'public.allowed_quantities'::regclass
+  ) then
+    alter table public.allowed_quantities
+      add constraint allowed_quantities_unique unique (node_id, unit_type_id);
+  end if;
+end $$;
 
 alter table public.allowed_quantities enable row level security;
 
@@ -1068,3 +1061,21 @@ drop trigger if exists trg_require_proof_for_prime_invoice on public.prime_invoi
 create trigger trg_require_proof_for_prime_invoice
 before insert or update on public.prime_invoices
 for each row execute function public.fn_require_proof_for_invoice();
+
+-- Helper: billing readiness view (after usage_events columns are present)
+create or replace view public.node_billing_ready as
+select
+  n.id,
+  n.node_number,
+  n.allowed_units,
+  n.used_units,
+  n.ready_for_billing,
+  (select bool_and(sl.completed) from public.splice_locations sl where sl.node_id = n.id) as all_splice_locations_complete,
+  (select bool_and(sl.photo_path is not null and sl.gps_lat is not null and sl.taken_at is not null)
+   from public.splice_locations sl where sl.node_id = n.id) as all_splice_proof_complete,
+  (select bool_and(ni.completed) from public.node_inventory ni where ni.node_id = n.id) as all_inventory_complete,
+  (select bool_and(
+     coalesce(ue.proof_required, true) = false
+     or (ue.photo_path is not null and ue.gps_lat is not null and ue.captured_at_server is not null)
+   ) from public.usage_events ue where ue.node_id = n.id) as all_usage_proof_complete
+from public.nodes n;
