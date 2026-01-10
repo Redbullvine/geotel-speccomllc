@@ -12,6 +12,10 @@ const state = {
   lastGPS: null,
   lastProof: null,
   usageEvents: [],
+  unitTypes: [],
+  allowedQuantities: [],
+  alerts: [],
+  materialCatalog: [],
   projects: [],
   realtime: {
     usageChannel: null,
@@ -22,6 +26,10 @@ const state = {
     nodes: {},
     invoices: [],
     usageEvents: [],
+    unitTypes: [],
+    allowedQuantities: [],
+    alerts: [],
+    materialCatalog: [],
   },
 };
 
@@ -33,6 +41,20 @@ function toast(title, body){
 }
 
 function nowISO(){ return new Date().toISOString(); }
+
+function setText(id, value){
+  const el = $(id);
+  if (el) el.textContent = value;
+}
+
+function setActiveView(viewId){
+  document.querySelectorAll(".view").forEach((view) => {
+    view.classList.toggle("active", view.id === viewId);
+  });
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.view === viewId);
+  });
+}
 
 function getRole(){
   return state.profile?.role || state.demo.role;
@@ -54,28 +76,48 @@ function computeNodeCompletion(node){
   return { locOk, invOk, pct };
 }
 
+function computeProofStatus(node){
+  const locs = node.splice_locations || [];
+  const locProofOk = locs.length > 0 && locs.every(l => l.gps && l.photo && l.taken_at);
+  const missingUsage = getMissingUsageProof(node.id);
+  const usageProofOk = missingUsage.length === 0;
+  return { locProofOk, usageProofOk, proofOk: locProofOk && usageProofOk };
+}
+
 function updateKPI(){
   const node = state.activeNode;
   if (!node){
-    $("kpiNode").textContent = "None";
-    $("kpiCompletion").textContent = "0%";
-    $("kpiUnits").textContent = "0 / 0";
-    $("chipStatus").innerHTML = '<span class="dot warn"></span><span>Waiting</span>';
+    setText("kpiNode", "None");
+    setText("kpiCompletion", "0%");
+    setText("kpiUnits", "0 / 0");
+    setText("dashNode", "None");
+    setText("dashCompletion", "0%");
+    setText("dashUnits", "0 / 0");
+    const chipStatus = $("chipStatus");
+    if (chipStatus){
+      chipStatus.innerHTML = '<span class="dot warn"></span><span>Waiting</span>';
+    }
     return;
   }
 
-  $("kpiNode").textContent = node.node_number;
+  setText("kpiNode", node.node_number);
+  setText("dashNode", node.node_number);
   const c = computeNodeCompletion(node);
-  $("kpiCompletion").textContent = `${c.pct}%`;
+  setText("kpiCompletion", `${c.pct}%`);
+  setText("dashCompletion", `${c.pct}%`);
 
   const units = getNodeUnits(node);
-  $("kpiUnits").textContent = `${units.used} / ${units.allowed}`;
+  setText("kpiUnits", `${units.used} / ${units.allowed}`);
+  setText("dashUnits", `${units.used} / ${units.allowed}`);
 
   // status chip
   const ratio = units.allowed > 0 ? (units.used / units.allowed) : 0;
   const dot = c.pct === 100 ? "ok" : ratio >= 0.9 ? "warn" : "warn";
   const label = c.pct === 100 ? "Ready" : "In progress";
-  $("chipStatus").innerHTML = `<span class="dot ${dot}"></span><span>${label}</span>`;
+  const chipStatus = $("chipStatus");
+  if (chipStatus){
+    chipStatus.innerHTML = `<span class="dot ${dot}"></span><span>${label}</span>`;
+  }
 
   // unit alert
   if (units.allowed > 0){
@@ -102,6 +144,9 @@ function setRoleUI(){
   if (seedBtn){
     seedBtn.style.display = (!isDemo && canSeedDemo()) ? "" : "none";
   }
+
+  updateAlertsBadge();
+  renderAlerts();
 }
 
 function showAuth(show){
@@ -150,6 +195,78 @@ function ensureDemoSeed(){
   state.demo.invoices = [
     { id:"inv-demo-1", node_number:"NODE-1001", from:"SUB", to:"PRIME", status:"Draft", amount_hidden:true },
   ];
+
+  state.demo.unitTypes = [
+    { id:"ut-ho-1", code:"HO-1", description:"Fiber housing 1" },
+    { id:"ut-ho-2", code:"HO-2", description:"Fiber housing 2" },
+    { id:"ut-splice", code:"SPLICE", description:"Splice unit" },
+  ];
+
+  state.demo.allowedQuantities = [
+    {
+      id: "aq-1",
+      node_id: node.id,
+      unit_type_id: "ut-ho-1",
+      allowed_qty: 362,
+      alert_threshold_pct: 0.15,
+      alert_threshold_abs: 50,
+    },
+  ];
+
+  state.demo.usageEvents = [
+    {
+      id: "use-1",
+      node_id: node.id,
+      item_id: null,
+      unit_type_id: "ut-ho-1",
+      qty: 320,
+      status: "approved",
+      captured_at: nowISO(),
+      gps_lat: 32.123456,
+      gps_lng: -104.987654,
+      photo_path: "demo-only",
+      proof_required: true,
+    },
+  ];
+
+  state.demo.materialCatalog = [
+    {
+      id: "mc-1",
+      millennium_part: "HAFO(OFDC-B8G)",
+      mfg_sku: "MFG-HAFO-B8G",
+      description: "TDS Millennium housing assembly (8G)",
+      photo_url: "./assets/millennium_example.png",
+    },
+    {
+      id: "mc-2",
+      millennium_part: "HxFO(1X2)PCOT(80/20)MO",
+      mfg_sku: "MFG-1X2-8020",
+      description: "Splitter module 1x2, 80/20",
+      photo_url: "./assets/millennium_example.png",
+    },
+    {
+      id: "mc-3",
+      millennium_part: "PF3-3",
+      mfg_sku: "MFG-PF3-3",
+      description: "PF3-3 splice tray kit",
+      photo_url: "./assets/millennium_example.png",
+    },
+  ];
+
+  state.demo.alerts = [
+    {
+      id: "alert-1",
+      node_id: node.id,
+      unit_type_id: "ut-ho-1",
+      allowed_qty: 362,
+      used_qty: 320,
+      remaining_qty: 42,
+      message: "Remaining units below threshold. Request approval for additional units.",
+      severity: "warning",
+      status: "open",
+      created_at: nowISO(),
+    },
+  ];
 }
 
 function renderProjects(){
@@ -195,6 +312,99 @@ async function loadProjects(){
     state.activeProject = match || null;
   }
   renderProjects();
+}
+
+async function loadUnitTypes(){
+  if (isDemo){
+    state.unitTypes = state.demo.unitTypes || [];
+    return;
+  }
+  const { data, error } = await state.client
+    .from("unit_types")
+    .select("id, code, description")
+    .order("code");
+  if (error){
+    toast("Unit types error", error.message);
+    return;
+  }
+  state.unitTypes = data || [];
+}
+
+async function loadAllowedQuantities(nodeId){
+  if (isDemo){
+    state.allowedQuantities = (state.demo.allowedQuantities || [])
+      .filter(a => !nodeId || a.node_id === nodeId)
+      .map((row) => {
+        const unit = getUnitTypeMeta(row.unit_type_id);
+        return {
+          ...row,
+          unit_code: unit.code,
+          unit_description: unit.description,
+        };
+      });
+    return;
+  }
+  if (!nodeId){
+    state.allowedQuantities = [];
+    return;
+  }
+  const { data, error } = await state.client
+    .from("allowed_quantities")
+    .select("id, node_id, unit_type_id, allowed_qty, alert_threshold_pct, alert_threshold_abs, unit_types(code, description)")
+    .eq("node_id", nodeId);
+  if (error){
+    toast("Allowed qty error", error.message);
+    return;
+  }
+  state.allowedQuantities = (data || []).map((row) => ({
+    id: row.id,
+    node_id: row.node_id,
+    unit_type_id: row.unit_type_id,
+    unit_code: row.unit_types?.code || "-",
+    unit_description: row.unit_types?.description || "",
+    allowed_qty: row.allowed_qty,
+    alert_threshold_pct: row.alert_threshold_pct,
+    alert_threshold_abs: row.alert_threshold_abs,
+  }));
+}
+
+async function loadMaterialCatalog(){
+  if (isDemo){
+    state.materialCatalog = state.demo.materialCatalog || [];
+    return;
+  }
+  const { data, error } = await state.client
+    .from("material_catalog")
+    .select("id, millennium_part, mfg_sku, description, photo_url")
+    .eq("active", true)
+    .order("millennium_part");
+  if (error){
+    toast("Catalog error", error.message);
+    return;
+  }
+  state.materialCatalog = data || [];
+}
+
+async function loadAlerts(nodeId){
+  if (isDemo){
+    state.alerts = (state.demo.alerts || []).filter(a => !nodeId || a.node_id === nodeId);
+    updateAlertsBadge();
+    return;
+  }
+  let query = state.client
+    .from("alerts")
+    .select("id, node_id, unit_type_id, allowed_qty, used_qty, remaining_qty, message, severity, status, created_at, unit_types(code)")
+    .order("created_at", { ascending: false });
+  if (nodeId){
+    query = query.eq("node_id", nodeId);
+  }
+  const { data, error } = await query;
+  if (error){
+    toast("Alerts error", error.message);
+    return;
+  }
+  state.alerts = data || [];
+  updateAlertsBadge();
 }
 
 function setActiveProjectById(id){
@@ -309,6 +519,37 @@ async function seedDemoNode(){
     }
   }
 
+  const { data: unitRows, error: unitErr } = await state.client
+    .from("unit_types")
+    .upsert(
+      items.map(i => ({ code: i.code, description: i.name })),
+      { onConflict: "code" }
+    )
+    .select("id, code");
+  if (unitErr){
+    toast("Unit types seed failed", unitErr.message);
+    return;
+  }
+
+  const unitMap = new Map((unitRows || []).map(r => [r.code, r.id]));
+  const allowedRows = items.map((i) => ({
+    node_id: node.id,
+    unit_type_id: unitMap.get(i.code),
+    allowed_qty: i.planned_qty,
+    alert_threshold_pct: 0.15,
+    alert_threshold_abs: 50,
+  })).filter(r => r.unit_type_id);
+
+  if (allowedRows.length){
+    const { error } = await state.client
+      .from("allowed_quantities")
+      .upsert(allowedRows, { onConflict: "node_id,unit_type_id" });
+    if (error){
+      toast("Allowed qty seed failed", error.message);
+      return;
+    }
+  }
+
   await loadProjects();
   state.activeProject = project;
   renderProjects();
@@ -393,6 +634,7 @@ function renderLocations(){
         loc.completed = next;
         renderLocations();
         updateKPI();
+        renderProofChecklist();
         return;
       }
       const { error } = await state.client
@@ -406,6 +648,7 @@ function renderLocations(){
       loc.completed = next;
       renderLocations();
       updateKPI();
+      renderProofChecklist();
     }
   });
 
@@ -491,15 +734,17 @@ function renderInventory(){
 
 function setProofStatus(){
   const el = $("proofStatus");
-  if (!el) return;
+  const mini = $("proofStatusMini");
   if (!state.lastProof){
-    el.textContent = "No proof photo captured";
+    if (el) el.textContent = "No proof photo captured";
+    if (mini) mini.textContent = "No proof captured yet.";
     return;
   }
   const gps = state.lastProof.gps
     ? `${state.lastProof.gps.lat.toFixed(6)}, ${state.lastProof.gps.lng.toFixed(6)}`
     : "GPS missing";
-  el.textContent = `Proof ready: ${state.lastProof.captured_at} (${gps})`;
+  if (el) el.textContent = `Proof ready: ${state.lastProof.captured_at} (${gps})`;
+  if (mini) mini.textContent = `Proof ready: ${state.lastProof.captured_at}`;
 }
 
 function clearProof(){
@@ -542,6 +787,15 @@ async function uploadProofPhoto(file, nodeId, prefix){
   return data?.path || path;
 }
 
+async function recordProofUpload(payload){
+  if (isDemo) return;
+  if (!state.client) return;
+  const { error } = await state.client.from("proof_uploads").insert(payload);
+  if (error){
+    toast("Proof log failed", error.message);
+  }
+}
+
 async function submitUsage(itemId, qty){
   const node = state.activeNode;
   if (!node) return;
@@ -559,6 +813,7 @@ async function submitUsage(itemId, qty){
     toast("Item missing", "This item is no longer available.");
     return;
   }
+  const unitTypeId = resolveUnitTypeIdForItem(plannedItem);
   const remaining = getRemainingForItem(plannedItem);
   const status = qty > remaining ? "needs_approval" : "approved";
 
@@ -567,6 +822,7 @@ async function submitUsage(itemId, qty){
       id: `use-${Date.now()}`,
       node_id: node.id,
       item_id: itemId,
+      unit_type_id: unitTypeId,
       qty,
       status,
       captured_at: state.lastProof.captured_at,
@@ -574,25 +830,35 @@ async function submitUsage(itemId, qty){
       gps_lng: state.lastProof.gps.lng,
       gps_accuracy_m: state.lastProof.gps.accuracy_m,
       photo_path: "demo-only",
+      proof_required: true,
     });
     if (status === "needs_approval"){
       toast("Needs approval", "Overage submitted and pending approval.");
     } else {
       toast("Usage submitted", "Approved usage recorded.");
     }
+    if (unitTypeId){
+      maybeCreateDemoAlert(node.id, unitTypeId);
+      state.alerts = state.demo.alerts || [];
+      updateAlertsBadge();
+      renderAlerts();
+    }
     clearProof();
     renderInventory();
+    renderAllowedQuantities();
+    renderProofChecklist();
     return;
   }
 
   const uploadPath = await uploadProofPhoto(state.lastProof.file, node.id, "usage");
   if (!uploadPath) return;
 
-  const { error } = await state.client
+  const { data, error } = await state.client
     .from("usage_events")
     .insert({
       node_id: node.id,
       item_id: itemId,
+      unit_type_id: unitTypeId,
       qty,
       status,
       photo_path: uploadPath,
@@ -600,11 +866,25 @@ async function submitUsage(itemId, qty){
       gps_lat: state.lastProof.gps.lat,
       gps_lng: state.lastProof.gps.lng,
       gps_accuracy_m: state.lastProof.gps.accuracy_m,
-    });
+      proof_required: true,
+    })
+    .select("id");
 
   if (error){
     toast("Usage error", error.message);
     return;
+  }
+  const usageId = data?.[0]?.id;
+  if (usageId){
+    await recordProofUpload({
+      node_id: node.id,
+      usage_event_id: usageId,
+      photo_url: uploadPath,
+      lat: state.lastProof.gps.lat,
+      lng: state.lastProof.gps.lng,
+      captured_at: state.lastProof.captured_at,
+      captured_by: state.user?.id || null,
+    });
   }
   if (status === "needs_approval"){
     toast("Needs approval", "Overage submitted and pending approval.");
@@ -613,14 +893,18 @@ async function submitUsage(itemId, qty){
   }
   clearProof();
   await loadUsageEvents(node.id);
+  await loadAlerts(node.id);
   renderInventory();
+  renderAllowedQuantities();
+  renderAlerts();
+  renderProofChecklist();
 }
 
 async function loadUsageEvents(nodeId){
   if (isDemo) return;
   const { data, error } = await state.client
     .from("usage_events")
-    .select("id,node_id,item_id,qty,status")
+    .select("id,node_id,item_id,unit_type_id,qty,status,photo_path,gps_lat,gps_lng,captured_at,proof_required")
     .eq("node_id", nodeId);
   if (error){
     toast("Usage load error", error.message);
@@ -668,7 +952,11 @@ function subscribeUsageEvents(nodeId){
       { event: "*", schema: "public", table: "usage_events", filter: `node_id=eq.${nodeId}` },
       async () => {
         await loadUsageEvents(nodeId);
+        await loadAlerts(nodeId);
         renderInventory();
+        renderAllowedQuantities();
+        renderProofChecklist();
+        renderAlerts();
       }
     )
     .subscribe();
@@ -699,11 +987,12 @@ function renderInvoicePanel(){
   }
 
   const completion = computeNodeCompletion(node);
-  const eligible = completion.pct === 100 && node.ready_for_billing;
+  const proof = computeProofStatus(node);
+  const eligible = completion.pct === 100 && node.ready_for_billing && proof.proofOk;
 
   html += `<div class="note">
     <div style="font-weight:900;">Billing gate</div>
-    <div class="muted small">Node can be invoiced only when: splice locations complete + inventory checklist complete + node marked READY.</div>
+    <div class="muted small">Node can be invoiced only when: splice locations complete + inventory checklist complete + proof captured + node marked READY.</div>
     <div style="margin-top:8px;">Status: ${eligible ? '<span class="pill-ok">ELIGIBLE</span>' : '<span class="pill-warn">NOT READY</span>'}</div>
   </div>`;
 
@@ -775,6 +1064,12 @@ function getUsageItemId(item){
   return item.item_id || item.id;
 }
 
+function resolveUnitTypeIdForItem(item){
+  const code = String(item.unit_type_code || item.item_code || "").toUpperCase();
+  const match = state.unitTypes.find(u => String(u.code || "").toUpperCase() === code);
+  return match?.id || null;
+}
+
 function getApprovedUsageQty(itemId){
   const events = isDemo ? state.demo.usageEvents : state.usageEvents;
   const nodeId = state.activeNode?.id;
@@ -783,10 +1078,222 @@ function getApprovedUsageQty(itemId){
     .reduce((sum, e) => sum + e.qty, 0);
 }
 
+function getApprovedUsageByUnitType(unitTypeId){
+  const events = isDemo ? state.demo.usageEvents : state.usageEvents;
+  const nodeId = state.activeNode?.id;
+  return events
+    .filter(e => e.unit_type_id === unitTypeId && e.status === "approved" && (!nodeId || e.node_id === nodeId))
+    .reduce((sum, e) => sum + e.qty, 0);
+}
+
+function getMissingUsageProof(nodeId){
+  const events = isDemo ? state.demo.usageEvents : state.usageEvents;
+  return events.filter((e) => {
+    if (nodeId && e.node_id !== nodeId) return false;
+    if (e.proof_required === false) return false;
+    return !e.photo_path || e.gps_lat == null || e.gps_lng == null || !e.captured_at;
+  });
+}
+
+function getUnitTypeMeta(unitTypeId){
+  const unit = state.unitTypes.find(u => u.id === unitTypeId);
+  if (!unit) return { code: "-", description: "" };
+  return { code: unit.code, description: unit.description || "" };
+}
+
 function getRemainingForItem(item){
   const planned = Number.isFinite(item.planned_qty) ? item.planned_qty : (item.qty_used || 0);
   const approved = getApprovedUsageQty(getUsageItemId(item));
   return planned - approved;
+}
+
+function updateAlertsBadge(){
+  const role = getRole();
+  const canSeeAlerts = role === "PRIME" || role === "OWNER";
+  const openAlerts = canSeeAlerts ? (state.alerts || []).filter(a => a.status === "open") : [];
+  const count = openAlerts.length;
+  const badge = $("alertsBadge");
+  if (badge){
+    badge.textContent = canSeeAlerts
+      ? (count ? `${count} alert${count > 1 ? "s" : ""}` : "No alerts")
+      : "Alerts for PRIME only";
+    badge.classList.toggle("warn", count > 0 && canSeeAlerts);
+  }
+  const navBadge = $("alertsNavBadge");
+  if (navBadge){
+    navBadge.textContent = count ? String(count) : "";
+    navBadge.style.display = count && canSeeAlerts ? "inline-flex" : "none";
+  }
+}
+
+function renderAlerts(){
+  const role = getRole();
+  const canSeeAlerts = role === "PRIME" || role === "OWNER";
+  const list = canSeeAlerts ? (state.alerts || []) : [];
+  const targets = [$("alertsFeed"), $("alertsFeedFull")].filter(Boolean);
+  if (!targets.length) return;
+  const html = list.length
+    ? list.map((alert) => {
+        const unit = getUnitTypeMeta(alert.unit_type_id);
+        const unitCode = alert.unit_types?.code || unit.code;
+        const unitDesc = unit.description;
+        const created = alert.created_at ? new Date(alert.created_at).toLocaleString() : "";
+        const nodeLabel = state.activeNode?.node_number || (alert.node_id ? String(alert.node_id).slice(0, 8) : "-");
+        return `
+          <div class="alert-card">
+            <div class="row" style="justify-content:space-between;">
+              <div>
+                <div style="font-weight:900">Node ${escapeHtml(nodeLabel)}</div>
+                <div class="muted small">${escapeHtml(unitCode)} ${escapeHtml(unitDesc)}</div>
+              </div>
+              <span class="chip"><span class="dot warn"></span><span>${escapeHtml(alert.severity || "warning")}</span></span>
+            </div>
+            <div class="muted small" style="margin-top:6px;">Allowed: ${alert.allowed_qty ?? "-"} | Used: ${alert.used_qty ?? "-"} | Remaining: ${alert.remaining_qty ?? "-"}</div>
+            <div style="margin-top:6px;">${escapeHtml(alert.message || "")}</div>
+            <div class="muted small" style="margin-top:6px;">${created}</div>
+          </div>
+        `;
+      }).join("")
+    : `<div class="muted small">${canSeeAlerts ? "No alerts right now." : "Alerts are available to PRIME / OWNER."}</div>`;
+  targets.forEach((el) => {
+    el.innerHTML = html;
+  });
+}
+
+function renderAllowedQuantities(){
+  const wrap = $("allowedQuantities");
+  if (!wrap) return;
+  const rows = state.allowedQuantities || [];
+  if (!state.activeNode || !rows.length){
+    wrap.innerHTML = '<div class="muted small">Open a node to see allowed quantities.</div>';
+    return;
+  }
+  wrap.innerHTML = `
+    <table class="table">
+      <thead><tr><th>Unit type</th><th>Allowed</th><th>Used</th><th>Remaining</th><th>Threshold</th></tr></thead>
+      <tbody>
+        ${rows.map((row) => {
+          const used = getApprovedUsageByUnitType(row.unit_type_id);
+          const remaining = row.allowed_qty - used;
+          const pct = row.alert_threshold_pct != null ? `${Math.round(row.alert_threshold_pct * 100)}%` : "-";
+          const abs = row.alert_threshold_abs != null ? row.alert_threshold_abs : "-";
+          return `
+            <tr>
+              <td>${escapeHtml(row.unit_code || "-")}</td>
+              <td>${row.allowed_qty}</td>
+              <td>${used}</td>
+              <td>${remaining}</td>
+              <td>${pct} / ${abs}</td>
+            </tr>
+          `;
+        }).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function maybeCreateDemoAlert(nodeId, unitTypeId){
+  if (!isDemo) return;
+  const row = (state.demo.allowedQuantities || []).find(a => a.node_id === nodeId && a.unit_type_id === unitTypeId);
+  if (!row) return;
+  const used = getApprovedUsageByUnitType(unitTypeId);
+  const remaining = row.allowed_qty - used;
+  const thresholdPct = row.alert_threshold_pct ?? 0.15;
+  const thresholdAbs = row.alert_threshold_abs ?? null;
+  const hitPct = row.allowed_qty > 0 && (remaining / row.allowed_qty) <= thresholdPct;
+  const hitAbs = thresholdAbs != null && remaining <= thresholdAbs;
+  if (!(hitPct || hitAbs)) return;
+  const exists = (state.demo.alerts || []).some(a => a.node_id === nodeId && a.unit_type_id === unitTypeId && a.status === "open");
+  if (exists) return;
+  state.demo.alerts = state.demo.alerts || [];
+  state.demo.alerts.unshift({
+    id: `alert-${Date.now()}`,
+    node_id: nodeId,
+    unit_type_id: unitTypeId,
+    allowed_qty: row.allowed_qty,
+    used_qty: used,
+    remaining_qty: remaining,
+    message: "Remaining units below threshold. Request approval for additional units.",
+    severity: "warning",
+    status: "open",
+    created_at: nowISO(),
+  });
+}
+
+function filterCatalog(term){
+  const needle = (term || "").trim().toLowerCase();
+  if (!needle) return state.materialCatalog || [];
+  return (state.materialCatalog || []).filter((item) => {
+    return [
+      item.millennium_part,
+      item.mfg_sku,
+      item.description,
+    ].some((field) => String(field || "").toLowerCase().includes(needle));
+  });
+}
+
+function renderCatalogResults(targetId, term){
+  const target = $(targetId);
+  if (!target) return;
+  const results = filterCatalog(term);
+  if (!results.length){
+    target.innerHTML = '<div class="muted small">No matching catalog items.</div>';
+    return;
+  }
+  target.innerHTML = results.map((item) => `
+    <div class="catalog-card">
+      <img class="catalog-photo" src="${item.photo_url || "./assets/millennium_example.png"}" alt="catalog photo"/>
+      <div>
+        <div class="catalog-title">${escapeHtml(item.description || "Catalog item")}</div>
+        <div class="muted small">Millennium: <b>${escapeHtml(item.millennium_part || "-")}</b></div>
+        <div class="muted small">MFG SKU: <b>${escapeHtml(item.mfg_sku || "-")}</b></div>
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderProofChecklist(){
+  const wrap = $("proofChecklist");
+  const summary = $("proofChecklistSummary");
+  const node = state.activeNode;
+  if (!wrap || !summary){
+    return;
+  }
+  if (!node){
+    wrap.innerHTML = '<div class="muted small">Open a node to see proof requirements.</div>';
+    summary.innerHTML = '<div class="muted small">No node selected.</div>';
+    return;
+  }
+
+  const locs = node.splice_locations || [];
+  const missingLocs = locs.filter(l => !l.gps || !l.photo || !l.taken_at);
+  const missingUsage = getMissingUsageProof(node.id);
+
+  summary.innerHTML = `
+    <div style="font-weight:900;">Proof required</div>
+    <div class="muted small">${missingLocs.length} splice locations missing proof, ${missingUsage.length} usage entries missing proof.</div>
+  `;
+
+  if (!locs.length){
+    wrap.innerHTML = '<div class="muted small">No splice locations yet.</div>';
+    return;
+  }
+
+  wrap.innerHTML = `
+    <table class="table">
+      <thead><tr><th>Location</th><th>GPS</th><th>Photo</th><th>Timestamp</th></tr></thead>
+      <tbody>
+        ${locs.map((loc) => `
+          <tr>
+            <td>${escapeHtml(loc.name)}</td>
+            <td>${loc.gps ? '<span class="pill-ok">OK</span>' : '<span class="pill-warn">Missing</span>'}</td>
+            <td>${loc.photo ? '<span class="pill-ok">OK</span>' : '<span class="pill-warn">Missing</span>'}</td>
+            <td>${loc.taken_at ? '<span class="pill-ok">OK</span>' : '<span class="pill-warn">Missing</span>'}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
 }
 
 async function captureGPS(){
@@ -837,6 +1344,7 @@ async function attachPhotoToLastIncomplete(file){
 
     renderLocations();
     updateKPI();
+    renderProofChecklist();
     return;
   }
 
@@ -869,8 +1377,18 @@ async function attachPhotoToLastIncomplete(file){
     ? { lat: data.gps_lat, lng: data.gps_lng, accuracy_m: data.gps_accuracy_m }
     : null;
   toast("Photo attached", `Attached to: ${loc.name}`);
+  await recordProofUpload({
+    node_id: node.id,
+    splice_location_id: loc.id,
+    photo_url: data.photo_path,
+    lat: gps?.lat ?? null,
+    lng: gps?.lng ?? null,
+    captured_at: takenAt,
+    captured_by: state.user?.id || null,
+  });
   renderLocations();
   updateKPI();
+  renderProofChecklist();
 }
 
 async function addSpliceLocation(){
@@ -889,6 +1407,7 @@ async function addSpliceLocation(){
     });
     renderLocations();
     updateKPI();
+    renderProofChecklist();
     return;
   }
 
@@ -918,6 +1437,7 @@ async function addSpliceLocation(){
   });
   renderLocations();
   updateKPI();
+  renderProofChecklist();
 }
 
 async function openNode(nodeNumber){
@@ -937,6 +1457,9 @@ async function openNode(nodeNumber){
     }
 
     state.activeNode = state.demo.nodes[n];
+    state.unitTypes = state.demo.unitTypes || [];
+    await loadAllowedQuantities(state.activeNode.id);
+    await loadAlerts(state.activeNode.id);
 
     // In real app, pricing is server-side protected.
     // Here we just display message.
@@ -944,6 +1467,9 @@ async function openNode(nodeNumber){
     renderLocations();
     renderInventory();
     renderInvoicePanel();
+    renderAllowedQuantities();
+    renderAlerts();
+    renderProofChecklist();
     updateKPI();
 
     // PRIME alert when near units
@@ -1045,12 +1571,17 @@ async function openNode(nodeNumber){
 
   state.activeNode = node;
   await loadUsageEvents(node.id);
+  await loadAllowedQuantities(node.id);
+  await loadAlerts(node.id);
   subscribeUsageEvents(node.id);
 
   setRoleUI();
   renderLocations();
   renderInventory();
   renderInvoicePanel();
+  renderAllowedQuantities();
+  renderAlerts();
+  renderProofChecklist();
   updateKPI();
 }
 
@@ -1106,6 +1637,11 @@ async function markNodeReady(){
     toast("Not ready", "Finish all splice locations + inventory checklist first.");
     return;
   }
+  const proof = computeProofStatus(node);
+  if (!proof.proofOk){
+    toast("Proof required", "Upload proof (GPS + photo + timestamp) before marking the node ready.");
+    return;
+  }
   if (isDemo){
     node.ready_for_billing = true;
   } else {
@@ -1141,6 +1677,11 @@ async function createInvoice(){
   const completion = computeNodeCompletion(node);
   if (!(completion.pct === 100 && node.ready_for_billing)){
     toast("Blocked", "Invoices are blocked until documentation is complete and node is marked READY.");
+    return;
+  }
+  const proof = computeProofStatus(node);
+  if (!proof.proofOk){
+    toast("Blocked", "Proof is required before invoice submission.");
     return;
   }
 
@@ -1203,13 +1744,21 @@ async function initAuth(){
     const pick = prompt("Demo mode: choose a role (TDS, PRIME, SUB, SPLICER, OWNER)", state.demo.role) || state.demo.role;
     const role = state.demo.roles.includes(pick.toUpperCase()) ? pick.toUpperCase() : state.demo.role;
     state.demo.role = role;
+    await loadUnitTypes();
+    await loadMaterialCatalog();
     setWhoami();
     setRoleUI();
     renderLocations();
     renderInventory();
     renderInvoicePanel();
+    renderAllowedQuantities();
+    renderAlerts();
+    renderProofChecklist();
     updateKPI();
     setProofStatus();
+    renderCatalogResults("catalogResults", "");
+    renderCatalogResults("catalogResultsQuick", "");
+    setActiveView("viewDashboard");
     return;
   }
 
@@ -1226,6 +1775,13 @@ async function initAuth(){
     if (state.user) {
       showAuth(false);
       await loadProjects();
+      await loadUnitTypes();
+      await loadMaterialCatalog();
+      await loadAlerts();
+      renderAlerts();
+      renderCatalogResults("catalogResults", "");
+      renderCatalogResults("catalogResultsQuick", "");
+      setActiveView("viewDashboard");
     } else {
       showAuth(true);
       state.activeNode = null;
@@ -1241,6 +1797,13 @@ async function initAuth(){
   await loadProfile();
   if (state.user){
     await loadProjects();
+    await loadUnitTypes();
+    await loadMaterialCatalog();
+    await loadAlerts();
+    renderAlerts();
+    renderCatalogResults("catalogResults", "");
+    renderCatalogResults("catalogResultsQuick", "");
+    setActiveView("viewDashboard");
   }
   setWhoami();
   showAuth(!state.user);
@@ -1273,6 +1836,10 @@ async function loadProfile(){
 }
 
 function wireUI(){
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.addEventListener("click", () => setActiveView(btn.dataset.view));
+  });
+
   $("btnDemo").addEventListener("click", () => {
     showAuth(false);
     initAuth();
@@ -1325,6 +1892,26 @@ function wireUI(){
     if (error) toast("Sign-up failed", error.message);
     else toast("Signed up", "Now assign a role in profiles (OWNER/PRIME/SUB/SPLICER/TDS).");
   });
+
+  const catalogSearch = $("catalogSearch");
+  if (catalogSearch){
+    catalogSearch.addEventListener("input", (e) => {
+      renderCatalogResults("catalogResults", e.target.value);
+    });
+  }
+  const catalogSearchQuick = $("catalogSearchQuick");
+  if (catalogSearchQuick){
+    catalogSearchQuick.addEventListener("input", (e) => {
+      renderCatalogResults("catalogResultsQuick", e.target.value);
+    });
+  }
+  const catalogClear = $("btnCatalogClear");
+  if (catalogClear){
+    catalogClear.addEventListener("click", () => {
+      if (catalogSearch) catalogSearch.value = "";
+      renderCatalogResults("catalogResults", "");
+    });
+  }
 
   $("btnOpenNode").addEventListener("click", () => openNode($("nodeNumber").value));
   $("btnNewNode").addEventListener("click", () => createNode($("nodeNumber").value));
