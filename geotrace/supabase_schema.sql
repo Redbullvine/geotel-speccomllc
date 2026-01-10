@@ -342,6 +342,7 @@ create table if not exists public.usage_events (
   gps_lat double precision,
   gps_lng double precision,
   gps_accuracy_m double precision,
+  camera boolean not null default false,
   created_by uuid references public.profiles(id),
   created_at timestamptz not null default now()
 );
@@ -350,7 +351,8 @@ alter table public.usage_events enable row level security;
 
 alter table public.usage_events
   add column if not exists captured_at_client timestamptz,
-  add column if not exists captured_at_server timestamptz not null default now();
+  add column if not exists captured_at_server timestamptz not null default now(),
+  add column if not exists camera boolean not null default false;
 
 create policy "usage_events_read_all_authed"
 on public.usage_events for select
@@ -679,6 +681,7 @@ create table if not exists public.proof_uploads (
   captured_at_client timestamptz,
   captured_at_server timestamptz not null default now(),
   device_info text,
+  camera boolean not null default false,
   captured_by uuid references public.profiles(id),
   created_at timestamptz not null default now()
 );
@@ -688,7 +691,8 @@ alter table public.proof_uploads enable row level security;
 alter table public.proof_uploads
   add column if not exists captured_at_client timestamptz,
   add column if not exists captured_at_server timestamptz not null default now(),
-  add column if not exists device_info text;
+  add column if not exists device_info text,
+  add column if not exists camera boolean not null default false;
 
 create policy "proof_uploads_read_all_authed"
 on public.proof_uploads for select
@@ -711,6 +715,9 @@ returns trigger
 language plpgsql
 as $$
 begin
+  if new.camera is not true then
+    raise exception 'Camera capture required for proof.';
+  end if;
   if new.lat is null or new.lng is null then
     raise exception 'GPS required for proof.';
   end if;

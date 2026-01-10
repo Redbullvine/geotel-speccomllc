@@ -184,16 +184,15 @@
             </div>
             <div class="card">
               <h2>Capture proof</h2>
-              <div class="muted small">Capture in the moment with GPS. No uploads from later photos.</div>
-              <div class="row" style="margin-top:12px;">
-                <button id="btnCaptureGPS" class="btn secondary">Capture GPS</button>
-                <button id="btnCaptureSplice" class="btn secondary">Capture splice photo</button>
-                <input id="splicePhotoFile" class="file-input" type="file" accept="image/*" capture="environment" />
-                <button id="btnSubmitSpliceProof" class="btn">Submit splice proof</button>
+              <div class="muted small">Camera-only. GPS required at capture time. No gallery uploads.</div>
+              <div class="camera-panel">
+                <video id="cameraStream" autoplay playsinline muted></video>
               </div>
               <div class="row" style="margin-top:12px;">
+                <button id="btnStartCamera" class="btn secondary">Start camera</button>
+                <button id="btnCaptureSplice" class="btn secondary">Capture splice proof</button>
                 <button id="btnCaptureProof" class="btn secondary">Capture usage proof</button>
-                <input id="proofPhotoFile" class="file-input" type="file" accept="image/*" capture="environment" />
+                <button id="btnSubmitSpliceProof" class="btn">Submit splice proof</button>
               </div>
               <div id="proofStatus" class="muted small" style="margin-top:10px;">No proof photo captured</div>
               <div id="proofPreview" class="proof-preview" style="margin-top:12px;"></div>

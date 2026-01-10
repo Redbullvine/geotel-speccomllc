@@ -13,6 +13,11 @@ const state = {
   lastGPS: null,
   lastProof: null,
   pendingSpliceProof: null,
+  cameraStream: null,
+  cameraReady: false,
+  cameraInvalidated: false,
+  cameraStartedAt: null,
+  lastVisibilityChangeAt: null,
   usageEvents: [],
   unitTypes: [],
   allowedQuantities: [],
@@ -56,6 +61,15 @@ function setActiveView(viewId){
   });
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.view === viewId);
+  });
+}
+
+function startVisibilityWatch(){
+  document.addEventListener("visibilitychange", () => {
+    state.lastVisibilityChangeAt = Date.now();
+    if (document.hidden){
+      state.cameraInvalidated = true;
+    }
   });
 }
 
@@ -996,63 +1010,42 @@ function renderProofPreview(){
 function clearProof(){
   state.lastProof = null;
   state.pendingSpliceProof = null;
-  const input = $("proofPhotoFile");
-  if (input) input.value = "";
-  const spliceInput = $("splicePhotoFile");
-  if (spliceInput) spliceInput.value = "";
+  state.cameraInvalidated = false;
   setProofStatus();
   renderProofPreview();
 }
 
 function clearUsageProof(){
   state.lastProof = null;
-  const input = $("proofPhotoFile");
-  if (input) input.value = "";
+  state.cameraInvalidated = false;
   setProofStatus();
   renderProofPreview();
 }
 
-async function handleProofFileSelected(file){
-  if (!file){
-    toast("Choose a photo", "Pick a proof photo first.");
-    return;
-  }
-  if (!state.lastGPS){
-    await captureGPS();
-  }
-  if (!state.lastGPS){
-    toast("GPS required", "GPS is required for payment.");
-    return;
-  }
-  state.lastProof = {
-    file,
-    captured_at: nowISO(),
-    gps: { ...state.lastGPS },
-    previewUrl: URL.createObjectURL(file),
-  };
-  setProofStatus();
-  renderProofPreview();
-}
-
-async function handleSplicePhotoSelected(file){
-  if (!file){
-    toast("Choose a photo", "Capture a splice photo first.");
-    return;
-  }
-  if (!state.lastGPS){
-    await captureGPS();
-  }
-  if (!state.lastGPS){
-    toast("GPS required", "GPS is required for payment.");
-    return;
-  }
+async function captureSpliceProof(){
+  const shot = await captureFrame();
+  if (!shot) return;
   state.pendingSpliceProof = {
-    file,
-    captured_at: nowISO(),
-    gps: { ...state.lastGPS },
-    previewUrl: URL.createObjectURL(file),
+    file: makeFileFromBlob(shot.blob),
+    captured_at: shot.captured_at,
+    gps: shot.gps,
+    previewUrl: shot.previewUrl,
+    camera: true,
   };
   renderProofPreview();
+}
+
+async function captureUsageProof(){
+  const shot = await captureFrame();
+  if (!shot) return;
+  state.lastProof = {
+    file: makeFileFromBlob(shot.blob),
+    captured_at: shot.captured_at,
+    gps: shot.gps,
+    previewUrl: shot.previewUrl,
+    camera: true,
+  };
+  setProofStatus();
 }
 
 async function uploadProofPhoto(file, nodeId, prefix){
@@ -1076,6 +1069,7 @@ async function recordProofUpload(payload){
   if (!state.client) return;
   const { error } = await state.client.from("proof_uploads").insert({
     device_info: navigator.userAgent,
+    camera: true,
     ...payload,
   });
   if (error){
@@ -1090,8 +1084,12 @@ async function submitUsage(itemId, qty){
     toast("Qty required", "Enter a valid quantity to submit.");
     return;
   }
-  if (!state.lastProof?.file || !state.lastProof?.gps || !state.lastProof?.captured_at){
+  if (!state.lastProof?.file || !state.lastProof?.gps || !state.lastProof?.captured_at || state.cameraInvalidated){
     toast("Proof required", "Capture a live photo with GPS before submitting usage.");
+    return;
+  }
+  if (!state.lastProof.camera){
+    toast("Camera required", "Camera capture required. Gallery uploads are not allowed.");
     return;
   }
 
@@ -1119,6 +1117,7 @@ async function submitUsage(itemId, qty){
       gps_accuracy_m: state.lastProof.gps.accuracy_m,
       photo_path: "demo-only",
       proof_required: true,
+      camera: true,
     });
     if (status === "needs_approval"){
       toast("Needs approval", "Overage submitted and pending approval.");
@@ -1132,6 +1131,7 @@ async function submitUsage(itemId, qty){
       renderAlerts();
     }
     clearUsageProof();
+    state.cameraInvalidated = false;
     renderInventory();
     renderAllowedQuantities();
     renderProofChecklist();
@@ -1155,6 +1155,7 @@ async function submitUsage(itemId, qty){
       gps_lng: state.lastProof.gps.lng,
       gps_accuracy_m: state.lastProof.gps.accuracy_m,
       proof_required: true,
+      camera: true,
     })
     .select("id");
 
@@ -1171,6 +1172,7 @@ async function submitUsage(itemId, qty){
       lat: state.lastProof.gps.lat,
       lng: state.lastProof.gps.lng,
       captured_at_client: state.lastProof.captured_at,
+      camera: true,
       captured_by: state.user?.id || null,
     });
   }
@@ -1180,6 +1182,7 @@ async function submitUsage(itemId, qty){
     toast("Usage submitted", "Approved usage recorded.");
   }
   clearUsageProof();
+  state.cameraInvalidated = false;
   await loadUsageEvents(node.id);
   await loadAlerts(node.id);
   renderInventory();
@@ -1192,7 +1195,7 @@ async function loadUsageEvents(nodeId){
   if (isDemo) return;
   const { data, error } = await state.client
     .from("usage_events")
-    .select("id,node_id,item_id,unit_type_id,qty,status,photo_path,gps_lat,gps_lng,captured_at_server,captured_at_client,proof_required")
+    .select("id,node_id,item_id,unit_type_id,qty,status,photo_path,gps_lat,gps_lng,captured_at_server,captured_at_client,proof_required,camera")
     .eq("node_id", nodeId);
   if (error){
     toast("Usage load error", error.message);
@@ -1614,6 +1617,81 @@ async function captureGPS(){
   });
 }
 
+async function startCamera(){
+  const video = $("cameraStream");
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    toast("Camera required", "Camera access required. Gallery uploads are not allowed.");
+    return false;
+  }
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    state.cameraStream = stream;
+    state.cameraReady = true;
+    state.cameraInvalidated = false;
+    state.cameraStartedAt = Date.now();
+    if (video){
+      video.srcObject = stream;
+    }
+    return true;
+  } catch (err){
+    toast("Camera required", "Camera access required. Gallery uploads are not allowed.");
+    state.cameraReady = false;
+    return false;
+  }
+}
+
+function ensureCameraReady(){
+  if (!state.cameraReady){
+    toast("Camera required", "Start the camera before capturing proof.");
+    return false;
+  }
+  if (state.cameraInvalidated){
+    toast("Capture blocked", "Page focus changed. Restart the camera to capture proof.");
+    return false;
+  }
+  return true;
+}
+
+async function captureFrame(){
+  const video = $("cameraStream");
+  if (!video){
+    toast("Camera required", "Camera access required. Gallery uploads are not allowed.");
+    return null;
+  }
+  if (!ensureCameraReady()){
+    return null;
+  }
+  if (document.hidden){
+    toast("Capture blocked", "Camera capture must be in the foreground.");
+    return null;
+  }
+  if (state.lastVisibilityChangeAt && state.cameraStartedAt && state.lastVisibilityChangeAt > state.cameraStartedAt){
+    toast("Capture blocked", "Page focus changed. Restart the camera to capture proof.");
+    return null;
+  }
+  const gps = await captureGPS();
+  if (!gps){
+    toast("GPS required", "GPS is required for payment.");
+    return null;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth || 1280;
+  canvas.height = video.videoHeight || 720;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+  if (!blob){
+    toast("Capture failed", "Unable to capture camera frame.");
+    return null;
+  }
+  return { blob, gps, captured_at: nowISO(), previewUrl: URL.createObjectURL(blob) };
+}
+
+function makeFileFromBlob(blob){
+  return new File([blob], `capture-${Date.now()}.jpg`, { type: "image/jpeg" });
+}
+
 async function submitSpliceProof(){
   const node = state.activeNode;
   if (!node) return;
@@ -1633,17 +1711,18 @@ async function submitSpliceProof(){
     return;
   }
 
-  if (isDemo){
-    loc.photo = { kind:"local", url: proof.previewUrl, name: proof.file.name, size: proof.file.size };
-    loc.taken_at = nowISO();
-    loc.gps = { lat: proof.gps.lat, lng: proof.gps.lng, accuracy_m: proof.gps.accuracy_m };
-    toast("Proof saved", `Attached to: ${loc.name}`);
-    state.pendingSpliceProof = null;
-    renderLocations();
-    updateKPI();
-    renderProofChecklist();
-    renderProofPreview();
-    return;
+    if (isDemo){
+      loc.photo = { kind:"local", url: proof.previewUrl, name: proof.file.name, size: proof.file.size };
+      loc.taken_at = nowISO();
+      loc.gps = { lat: proof.gps.lat, lng: proof.gps.lng, accuracy_m: proof.gps.accuracy_m };
+      toast("Proof saved", `Attached to: ${loc.name}`);
+      state.cameraInvalidated = false;
+      state.pendingSpliceProof = null;
+      renderLocations();
+      updateKPI();
+      renderProofChecklist();
+      renderProofPreview();
+      return;
   }
 
   const uploadPath = await uploadProofPhoto(proof.file, node.id, "splice");
@@ -1680,9 +1759,11 @@ async function submitSpliceProof(){
     lat: gps?.lat ?? null,
     lng: gps?.lng ?? null,
     captured_at_client: proof.captured_at,
+    camera: true,
     captured_by: state.user?.id || null,
   });
   state.pendingSpliceProof = null;
+  state.cameraInvalidated = false;
   renderLocations();
   updateKPI();
   renderProofChecklist();
@@ -2296,17 +2377,9 @@ function wireUI(){
   $("btnAddLocation").addEventListener("click", () => addSpliceLocation());
   $("btnCaptureGPS").addEventListener("click", () => captureGPS());
 
-  const spliceInput = $("splicePhotoFile");
-  if (spliceInput){
-    spliceInput.addEventListener("change", () => {
-      const f = spliceInput.files?.[0];
-      handleSplicePhotoSelected(f);
-    });
-  }
-
   const spliceCaptureBtn = $("btnCaptureSplice");
-  if (spliceCaptureBtn && spliceInput){
-    spliceCaptureBtn.addEventListener("click", () => spliceInput.click());
+  if (spliceCaptureBtn){
+    spliceCaptureBtn.addEventListener("click", () => captureSpliceProof());
   }
 
   const submitSpliceBtn = $("btnSubmitSpliceProof");
@@ -2314,21 +2387,20 @@ function wireUI(){
     submitSpliceBtn.addEventListener("click", () => submitSpliceProof());
   }
 
-  const proofInput = $("proofPhotoFile");
-  if (proofInput){
-    proofInput.addEventListener("change", () => {
-      const f = proofInput.files?.[0];
-      handleProofFileSelected(f);
-    });
+  const startCameraBtn = $("btnStartCamera");
+  if (startCameraBtn){
+    startCameraBtn.addEventListener("click", () => startCamera());
   }
+
   const proofBtn = $("btnCaptureProof");
-  if (proofBtn && proofInput){
-    proofBtn.addEventListener("click", () => proofInput.click());
+  if (proofBtn){
+    proofBtn.addEventListener("click", () => captureUsageProof());
   }
 
   $("btnMarkNodeReady").addEventListener("click", () => markNodeReady());
   $("btnCreateInvoice").addEventListener("click", () => createInvoice());
 }
 
+startVisibilityWatch();
 wireUI();
 initAuth();
