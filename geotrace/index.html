@@ -80,7 +80,7 @@
         <nav class="nav">
           <button class="nav-item active" data-view="viewDashboard">Dashboard</button>
           <button class="nav-item" data-view="viewNodes">Nodes</button>
-          <button class="nav-item" data-view="viewProof">Proof</button>
+          <button class="nav-item" data-view="viewPhotos">Photos</button>
           <button class="nav-item" data-view="viewInvoices">Invoices</button>
           <button class="nav-item" data-view="viewCatalog">Material Catalog</button>
           <button class="nav-item" data-view="viewAlerts">Alerts <span id="alertsNavBadge" class="nav-badge"></span></button>
@@ -96,7 +96,7 @@
                 <h2 id="jobTitle">Job 731022136</h2>
                 <div id="jobSubtitle" class="muted small">Ruidoso FTTH Rebuild (node-by-node workflow)</div>
               </div>
-              <div class="no-pay-badge">No pay without proof</div>
+              <div class="no-pay-badge">No pay without photos</div>
             </div>
             <div id="nodeCards" class="node-grid" style="margin-top:12px;"></div>
           </div>
@@ -123,7 +123,7 @@
                 <span id="chipPricing" class="chip"><span class="dot bad"></span><span>Pricing hidden from splicers</span></span>
               </div>
               <div class="hr"></div>
-              <div id="proofChecklistSummary" class="note"></div>
+              <div id="photoChecklistSummary" class="note"></div>
             </div>
             <div class="card">
               <h2>Alerts</h2>
@@ -158,11 +158,15 @@
             <div class="hr"></div>
 
             <h2>Splice locations</h2>
-            <p class="muted small">Each location must have: GPS + photo + timestamp before billing can occur.</p>
+            <p class="muted small">Each location must have: open + closed splice photos with GPS + timestamp before billing can occur.</p>
 
             <div class="row">
               <button id="btnAddLocation" class="btn secondary">Add splice location</button>
-              <span id="proofStatusMini" class="muted small">No proof captured yet.</span>
+              <button id="btnStartCameraNodes" class="btn ghost">Start camera</button>
+              <span id="photoStatusMini" class="muted small">No photo captured yet.</span>
+            </div>
+            <div class="camera-panel camera-panel-small">
+              <video id="cameraStreamNodes" autoplay playsinline muted></video>
             </div>
 
             <div id="locations" style="margin-top:12px;"></div>
@@ -175,27 +179,25 @@
           </div>
         </section>
 
-        <section id="viewProof" class="view">
+        <section id="viewPhotos" class="view">
           <div class="grid cols-2">
             <div class="card">
-              <h2>Proof checklist</h2>
-              <div class="no-pay-banner">Proof missing → Cannot bill → No pay</div>
-              <div id="proofChecklist"></div>
+              <h2>Photo checklist</h2>
+              <div class="no-pay-banner">Photos missing → Cannot bill → No pay</div>
+              <div id="photoChecklist"></div>
             </div>
             <div class="card">
-              <h2>Capture proof</h2>
+              <h2>Capture photos</h2>
               <div class="muted small">Camera-only. GPS required at capture time. No gallery uploads.</div>
               <div class="camera-panel">
                 <video id="cameraStream" autoplay playsinline muted></video>
               </div>
               <div class="row" style="margin-top:12px;">
                 <button id="btnStartCamera" class="btn secondary">Start camera</button>
-                <button id="btnCaptureSplice" class="btn secondary">Capture splice proof</button>
-                <button id="btnCaptureProof" class="btn secondary">Capture usage proof</button>
-                <button id="btnSubmitSpliceProof" class="btn">Submit splice proof</button>
+                <button id="btnCapturePhoto" class="btn secondary">Capture usage photo</button>
               </div>
-              <div id="proofStatus" class="muted small" style="margin-top:10px;">No proof photo captured</div>
-              <div id="proofPreview" class="proof-preview" style="margin-top:12px;"></div>
+              <div id="photoStatus" class="muted small" style="margin-top:10px;">No photo captured</div>
+              <div id="photoPreview" class="photo-preview" style="margin-top:12px;"></div>
             </div>
           </div>
         </section>
@@ -204,8 +206,8 @@
           <div class="grid cols-2">
             <div class="card">
               <h2>Invoice actions</h2>
-              <div class="no-pay-banner">Proof missing → Cannot bill → No pay</div>
-              <div class="muted small">Billing entry is blocked until proof is complete.</div>
+              <div class="no-pay-banner">Photos missing → Cannot bill → No pay</div>
+              <div class="muted small">Billing entry is blocked until photos are complete.</div>
               <div class="row" style="margin-top:12px;">
                 <button id="btnMarkNodeReady" class="btn">Mark node READY for billing</button>
                 <button id="btnCreateInvoice" class="btn secondary">Create invoice (role-based)</button>

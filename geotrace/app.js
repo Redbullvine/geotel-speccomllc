@@ -12,7 +12,6 @@ const state = {
   projectNodes: [],
   lastGPS: null,
   lastProof: null,
-  pendingSpliceProof: null,
   cameraStream: null,
   cameraReady: false,
   cameraInvalidated: false,
@@ -95,10 +94,14 @@ function computeNodeCompletion(node){
 
 function computeProofStatus(node){
   const locs = node.splice_locations || [];
-  const locProofOk = locs.length > 0 && locs.every(l => l.gps && l.photo && l.taken_at);
+  const locPhotosOk = locs.length > 0 && locs.every((l) => {
+    const openOk = Boolean(l.photos?.open);
+    const closedOk = Boolean(l.photos?.closed);
+    return openOk && closedOk;
+  });
   const missingUsage = getMissingUsageProof(node.id);
-  const usageProofOk = missingUsage.length === 0;
-  return { locProofOk, usageProofOk, proofOk: locProofOk && usageProofOk };
+  const usagePhotosOk = missingUsage.length === 0;
+  return { locPhotosOk, usagePhotosOk, photosOk: locPhotosOk && usagePhotosOk };
 }
 
 function updateKPI(){
@@ -232,8 +235,8 @@ function ensureDemoSeed(){
     units_allowed: 120,
     units_used: 103,
     splice_locations: [
-      { id:"loc-1", name:"Cabinet A - Tray 1", gps:null, photo:null, taken_at:null, completed:false },
-      { id:"loc-2", name:"Pedestal 12B - Splice Case", gps:null, photo:null, taken_at:null, completed:false },
+      { id:"loc-1", name:"Cabinet A - Tray 1", gps:null, photo:null, taken_at:null, completed:false, photos:{ open:null, closed:null } },
+      { id:"loc-2", name:"Pedestal 12B - Splice Case", gps:null, photo:null, taken_at:null, completed:false, photos:{ open:null, closed:null } },
     ],
     inventory_checks: [
       { id:"inv-1", item_code:"HAFO(OFDC-B8G)", item_name:"TDS Millennium example", photo:"./assets/millennium_example.png", qty_used: 2, planned_qty: 12, completed:false },
@@ -497,9 +500,9 @@ async function completeNode(nodeId){
     toast("Open node", "Open the node before marking it complete.");
     return;
   }
-  const proof = computeProofStatus(state.activeNode);
-  if (!proof.proofOk){
-    toast("No pay", "Proof missing. Completion is blocked.");
+  const photos = computeProofStatus(state.activeNode);
+  if (!photos.photosOk){
+    toast("No pay", "Photos missing. Completion is blocked.");
     return;
   }
   if (isDemo){
@@ -800,61 +803,64 @@ function renderLocations(){
     return;
   }
 
-  const table = document.createElement("table");
-  table.className = "table";
-  table.innerHTML = `
-    <thead>
-      <tr>
-        <th>Location</th>
-        <th>GPS</th>
-        <th>Photo</th>
-        <th>Timestamp</th>
-        <th>Done</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  `;
-  const tb = table.querySelector("tbody");
-
+  const list = document.createElement("div");
+  list.className = "location-list";
   rows.forEach((r) => {
-    const gps = r.gps ? `${r.gps.lat.toFixed(6)}, ${r.gps.lng.toFixed(6)}` : "-";
-    const photo = r.photo ? "attached" : "-";
-    const ts = r.taken_at ? new Date(r.taken_at).toLocaleString() : "-";
-    const done = r.completed ? '<span class="pill-ok">YES</span>' : '<span class="pill-warn">NO</span>';
+    const openPhoto = r.photos?.open;
+    const closedPhoto = r.photos?.closed;
+    const openOk = Boolean(openPhoto);
+    const closedOk = Boolean(closedPhoto);
+    const done = r.completed ? '<span class="pill-ok">COMPLETE</span>' : '<span class="pill-warn">INCOMPLETE</span>';
+    const missing = !openOk || !closedOk;
 
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>
-        <div style="font-weight:900">${escapeHtml(r.name)}</div>
-        <div class="muted small">${escapeHtml(r.id)}</div>
-      </td>
-      <td>${gps}</td>
-      <td>${photo}</td>
-      <td>${ts}</td>
-      <td>
-        <div class="row">
-          <button class="btn secondary small" data-action="toggleComplete" data-id="${r.id}">${r.completed ? "Undo" : "Mark complete"}</button>
+    const card = document.createElement("div");
+    card.className = "card location-card";
+    card.innerHTML = `
+      <div class="row" style="justify-content:space-between;">
+        <div>
+          <div style="font-weight:900">${escapeHtml(r.name)}</div>
+          <div class="muted small">${escapeHtml(r.id)}</div>
+          <div class="muted small">Photo must be taken at the splice location.</div>
         </div>
-      </td>
+        <div>${done}</div>
+      </div>
+      <div class="hr"></div>
+      <div class="grid cols-2">
+        <div>
+          <div style="font-weight:900;">Open splice photo</div>
+          ${openOk ? renderPhotoMeta(openPhoto) : '<div class="muted small">No photo yet.</div>'}
+          <button class="btn secondary" data-action="takePhoto" data-id="${r.id}" data-type="open">Take open photo</button>
+        </div>
+        <div>
+          <div style="font-weight:900;">Closed splice photo</div>
+          ${closedOk ? renderPhotoMeta(closedPhoto) : '<div class="muted small">No photo yet.</div>'}
+          <button class="btn secondary" data-action="takePhoto" data-id="${r.id}" data-type="closed">Take closed photo</button>
+        </div>
+      </div>
+      <div class="hr"></div>
+      <div class="row">
+        <button class="btn ghost" data-action="toggleComplete" data-id="${r.id}" ${missing ? "disabled" : ""}>${r.completed ? "Undo complete" : "Mark complete"}</button>
+      </div>
     `;
-    tb.appendChild(tr);
+    list.appendChild(card);
   });
 
-  table.addEventListener("click", async (e) => {
+  list.addEventListener("click", async (e) => {
     const btn = e.target.closest("button");
     if (!btn) return;
     const action = btn.dataset.action;
     const id = btn.dataset.id;
+    if (action === "takePhoto"){
+      const type = btn.dataset.type;
+      await captureSplicePhotoForLocation(id, type);
+      return;
+    }
     if (action === "toggleComplete"){
       const loc = node.splice_locations.find(x => x.id === id);
       if (!loc) return;
-
-      // Must have gps + photo + timestamp
-      if (!loc.completed){
-        if (!loc.gps || !loc.photo || !loc.taken_at){
-          toast("Missing evidence", "This splice location needs GPS, photo, and timestamp before it can be completed.");
-          return;
-        }
+      if (!loc.photos?.open || !loc.photos?.closed){
+        toast("Photos required", "Open and closed splice photos are required before completion.");
+        return;
       }
       const next = !loc.completed;
       if (isDemo){
@@ -879,7 +885,7 @@ function renderLocations(){
     }
   });
 
-  wrap.appendChild(table);
+  wrap.appendChild(list);
 }
 
 function renderInventory(){
@@ -960,32 +966,47 @@ function renderInventory(){
 }
 
 function setProofStatus(){
-  const el = $("proofStatus");
-  const mini = $("proofStatusMini");
+  const el = $("photoStatus");
+  const mini = $("photoStatusMini");
   if (!state.lastProof){
-    if (el) el.textContent = "No proof photo captured";
-    if (mini) mini.textContent = "No proof captured yet.";
+    if (el) el.textContent = "No photo captured";
+    if (mini) mini.textContent = "No photo captured yet.";
     renderProofPreview();
     return;
   }
   const gps = state.lastProof.gps
     ? `${state.lastProof.gps.lat.toFixed(6)}, ${state.lastProof.gps.lng.toFixed(6)}`
     : "GPS missing";
-  if (el) el.textContent = `Proof ready: ${state.lastProof.captured_at} (${gps})`;
-  if (mini) mini.textContent = `Proof ready: ${state.lastProof.captured_at}`;
+  if (el) el.textContent = `Photo ready: ${state.lastProof.captured_at} (${gps})`;
+  if (mini) mini.textContent = `Photo ready: ${state.lastProof.captured_at}`;
   renderProofPreview();
 }
 
+function renderPhotoMeta(photo){
+  if (!photo) return "";
+  const gps = photo.gps ? `${photo.gps.lat.toFixed(6)}, ${photo.gps.lng.toFixed(6)}` : "GPS missing";
+  const ts = photo.captured_at ? new Date(photo.captured_at).toLocaleString() : "Timestamp missing";
+  const thumb = photo.previewUrl
+    ? `<img class="photo-thumb" src="${photo.previewUrl}" alt="splice photo"/>`
+    : `<div class="muted small">Photo captured</div>`;
+  return `
+    <div class="photo-meta">
+      ${thumb}
+      <div class="muted small">Time: ${ts}</div>
+      <div class="gps-badge">GPS: ${gps}</div>
+    </div>
+  `;
+}
+
 function renderProofPreview(){
-  const wrap = $("proofPreview");
+  const wrap = $("photoPreview");
   if (!wrap) return;
   const items = [
-    state.pendingSpliceProof ? { label: "Splice proof", data: state.pendingSpliceProof } : null,
-    state.lastProof ? { label: "Usage proof", data: state.lastProof } : null,
+    state.lastProof ? { label: "Usage photo", data: state.lastProof } : null,
   ].filter(Boolean);
 
   if (!items.length){
-    wrap.innerHTML = '<div class="muted small">No proof captured yet.</div>';
+    wrap.innerHTML = '<div class="muted small">No photo captured yet.</div>';
     return;
   }
 
@@ -996,7 +1017,7 @@ function renderProofPreview(){
       : "GPS missing";
     return `
       <div class="row" style="gap:16px; align-items:flex-start;">
-        ${photoUrl ? `<img src="${photoUrl}" alt="proof photo" />` : ""}
+        ${photoUrl ? `<img src="${photoUrl}" alt="usage photo" />` : ""}
         <div>
           <div style="font-weight:900">${item.label}</div>
           <div class="muted small">${item.data.captured_at}</div>
@@ -1009,7 +1030,6 @@ function renderProofPreview(){
 
 function clearProof(){
   state.lastProof = null;
-  state.pendingSpliceProof = null;
   state.cameraInvalidated = false;
   setProofStatus();
   renderProofPreview();
@@ -1019,19 +1039,6 @@ function clearUsageProof(){
   state.lastProof = null;
   state.cameraInvalidated = false;
   setProofStatus();
-  renderProofPreview();
-}
-
-async function captureSpliceProof(){
-  const shot = await captureFrame();
-  if (!shot) return;
-  state.pendingSpliceProof = {
-    file: makeFileFromBlob(shot.blob),
-    captured_at: shot.captured_at,
-    gps: shot.gps,
-    previewUrl: shot.previewUrl,
-    camera: true,
-  };
   renderProofPreview();
 }
 
@@ -1048,10 +1055,77 @@ async function captureUsageProof(){
   setProofStatus();
 }
 
+async function captureSplicePhotoForLocation(locationId, photoType){
+  const node = state.activeNode;
+  if (!node){
+    toast("No node", "Open a node first.");
+    return;
+  }
+  if (photoType !== "open" && photoType !== "closed"){
+    toast("Photo type required", "Select open or closed splice photo.");
+    return;
+  }
+  const loc = node.splice_locations.find(l => l.id === locationId);
+  if (!loc){
+    toast("Location missing", "Splice location not found.");
+    return;
+  }
+  const jobNumber = state.activeProject?.job_number;
+  if (!jobNumber){
+    toast("Job required", "Job number required to save photos.");
+    return;
+  }
+  const shot = await captureFrame();
+  if (!shot) return;
+
+  const file = makeFileFromBlob(shot.blob);
+
+  if (isDemo){
+    loc.photos = loc.photos || { open: null, closed: null };
+    loc.photos[photoType] = {
+      previewUrl: shot.previewUrl,
+      captured_at: shot.captured_at,
+      gps: shot.gps,
+    };
+    state.cameraInvalidated = false;
+    renderLocations();
+    renderProofChecklist();
+    return;
+  }
+
+  const uploadPath = await uploadProofPhoto(file, node.id, `splice-${photoType}`);
+  if (!uploadPath) return;
+
+  const gps = shot.gps;
+  await recordProofUpload({
+    node_id: node.id,
+    splice_location_id: loc.id,
+    photo_url: uploadPath,
+    lat: gps?.lat ?? null,
+    lng: gps?.lng ?? null,
+    captured_at_client: shot.captured_at,
+    photo_type: photoType,
+    job_number: jobNumber,
+    camera: true,
+    captured_by: state.user?.id || null,
+  });
+
+  loc.photos = loc.photos || { open: null, closed: null };
+  loc.photos[photoType] = {
+    path: uploadPath,
+    previewUrl: shot.previewUrl,
+    captured_at: shot.captured_at,
+    gps: shot.gps,
+  };
+  state.cameraInvalidated = false;
+  renderLocations();
+  renderProofChecklist();
+}
+
 async function uploadProofPhoto(file, nodeId, prefix){
   if (!state.client) return null;
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const folder = `${prefix || "proof"}/node-${nodeId}`;
+  const folder = `${prefix || "photos"}/node-${nodeId}`;
   const path = `${folder}/${Date.now()}-${safeName}`;
   const { data, error } = await state.client
     .storage
@@ -1073,7 +1147,7 @@ async function recordProofUpload(payload){
     ...payload,
   });
   if (error){
-    toast("Proof log failed", error.message);
+    toast("Photo log failed", error.message);
   }
 }
 
@@ -1085,11 +1159,16 @@ async function submitUsage(itemId, qty){
     return;
   }
   if (!state.lastProof?.file || !state.lastProof?.gps || !state.lastProof?.captured_at || state.cameraInvalidated){
-    toast("Proof required", "Capture a live photo with GPS before submitting usage.");
+    toast("Photos required", "Capture a live photo with GPS before submitting usage.");
     return;
   }
   if (!state.lastProof.camera){
     toast("Camera required", "Camera capture required. Gallery uploads are not allowed.");
+    return;
+  }
+  const jobNumber = state.activeProject?.job_number;
+  if (!jobNumber){
+    toast("Job required", "Job number required to submit usage photos.");
     return;
   }
 
@@ -1172,6 +1251,7 @@ async function submitUsage(itemId, qty){
       lat: state.lastProof.gps.lat,
       lng: state.lastProof.gps.lng,
       captured_at_client: state.lastProof.captured_at,
+      job_number: jobNumber,
       camera: true,
       captured_by: state.user?.id || null,
     });
@@ -1278,12 +1358,12 @@ function renderInvoicePanel(){
   }
 
   const completion = computeNodeCompletion(node);
-  const proof = computeProofStatus(node);
-  const eligible = completion.pct === 100 && node.ready_for_billing && proof.proofOk;
+  const photos = computeProofStatus(node);
+  const eligible = completion.pct === 100 && node.ready_for_billing && photos.photosOk;
 
   html += `<div class="note">
     <div style="font-weight:900;">Billing gate</div>
-    <div class="muted small">Node can be invoiced only when: splice locations complete + inventory checklist complete + proof captured + node marked READY.</div>
+    <div class="muted small">Node can be invoiced only when: splice locations complete + inventory checklist complete + photos captured + node marked READY.</div>
     <div style="margin-top:8px;">Status: ${eligible ? '<span class="pill-ok">ELIGIBLE</span>' : '<span class="pill-warn">NOT READY</span>'}</div>
   </div>`;
 
@@ -1382,6 +1462,7 @@ function getMissingUsageProof(nodeId){
   return events.filter((e) => {
     if (nodeId && e.node_id !== nodeId) return false;
     if (e.proof_required === false) return false;
+    if (e.camera !== true) return true;
     const serverTime = e.captured_at_server || e.captured_at;
     return !e.photo_path || e.gps_lat == null || e.gps_lng == null || !serverTime;
   });
@@ -1416,6 +1497,44 @@ function updateAlertsBadge(){
     navBadge.textContent = count ? String(count) : "";
     navBadge.style.display = count && canSeeAlerts ? "inline-flex" : "none";
   }
+}
+
+async function loadSplicePhotos(nodeId, locs){
+  if (isDemo){
+    locs.forEach((loc) => {
+      loc.photos = loc.photos || { open: null, closed: null };
+    });
+    return;
+  }
+  if (!state.client || !locs.length) return;
+  const { data, error } = await state.client
+    .from("proof_uploads")
+    .select("splice_location_id, photo_url, lat, lng, captured_at_server, photo_type")
+    .eq("node_id", nodeId)
+    .not("splice_location_id", "is", null);
+  if (error){
+    toast("Photos load error", error.message);
+    return;
+  }
+  const byLoc = new Map();
+  (data || []).forEach((row) => {
+    if (!row.photo_type) return;
+    const key = row.splice_location_id;
+    if (!byLoc.has(key)) byLoc.set(key, {});
+    const current = byLoc.get(key);
+    current[row.photo_type] = {
+      path: row.photo_url,
+      gps: row.lat != null && row.lng != null ? { lat: row.lat, lng: row.lng } : null,
+      captured_at: row.captured_at_server,
+    };
+  });
+  locs.forEach((loc) => {
+    const photos = byLoc.get(loc.id) || {};
+    loc.photos = {
+      open: photos.open || null,
+      closed: photos.closed || null,
+    };
+  });
 }
 
 function renderAlerts(){
@@ -1545,25 +1664,25 @@ function renderCatalogResults(targetId, term){
 }
 
 function renderProofChecklist(){
-  const wrap = $("proofChecklist");
-  const summary = $("proofChecklistSummary");
+  const wrap = $("photoChecklist");
+  const summary = $("photoChecklistSummary");
   const node = state.activeNode;
   if (!wrap || !summary){
     return;
   }
   if (!node){
-    wrap.innerHTML = '<div class="muted small">Open a node to see proof requirements.</div>';
+    wrap.innerHTML = '<div class="muted small">Open a node to see photo requirements.</div>';
     summary.innerHTML = '<div class="muted small">No node selected.</div>';
     return;
   }
 
   const locs = node.splice_locations || [];
-  const missingLocs = locs.filter(l => !l.gps || !l.photo || !l.taken_at);
+  const missingLocs = locs.filter(l => !l.photos?.open || !l.photos?.closed);
   const missingUsage = getMissingUsageProof(node.id);
 
   summary.innerHTML = `
-    <div style="font-weight:900;">Proof required</div>
-    <div class="muted small">${missingLocs.length} splice locations missing proof, ${missingUsage.length} usage entries missing proof.</div>
+    <div style="font-weight:900;">Photos required</div>
+    <div class="muted small">${missingLocs.length} splice locations missing photos, ${missingUsage.length} usage entries missing photos.</div>
   `;
 
   if (!locs.length){
@@ -1573,14 +1692,13 @@ function renderProofChecklist(){
 
   wrap.innerHTML = `
     <table class="table">
-      <thead><tr><th>Location</th><th>GPS</th><th>Photo</th><th>Timestamp</th></tr></thead>
+      <thead><tr><th>Location</th><th>Open photo</th><th>Closed photo</th></tr></thead>
       <tbody>
         ${locs.map((loc) => `
           <tr>
             <td>${escapeHtml(loc.name)}</td>
-            <td>${loc.gps ? '<span class="pill-ok">OK</span>' : '<span class="pill-warn">Missing</span>'}</td>
-            <td>${loc.photo ? '<span class="pill-ok">OK</span>' : '<span class="pill-warn">Missing</span>'}</td>
-            <td>${loc.taken_at ? '<span class="pill-ok">OK</span>' : '<span class="pill-warn">Missing</span>'}</td>
+            <td>${loc.photos?.open ? '<span class="pill-ok">OK</span>' : '<span class="pill-warn">Missing</span>'}</td>
+            <td>${loc.photos?.closed ? '<span class="pill-ok">OK</span>' : '<span class="pill-warn">Missing</span>'}</td>
           </tr>
         `).join("")}
       </tbody>
@@ -1602,10 +1720,6 @@ async function captureGPS(){
           state.lastProof.gps = { ...state.lastGPS };
           setProofStatus();
         }
-        if (state.pendingSpliceProof){
-          state.pendingSpliceProof.gps = { ...state.lastGPS };
-          renderProofPreview();
-        }
         resolve(state.lastGPS);
       },
       (err) => {
@@ -1619,6 +1733,7 @@ async function captureGPS(){
 
 async function startCamera(){
   const video = $("cameraStream");
+  const videoNodes = $("cameraStreamNodes");
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
     toast("Camera required", "Camera access required. Gallery uploads are not allowed.");
     return false;
@@ -1632,6 +1747,9 @@ async function startCamera(){
     if (video){
       video.srcObject = stream;
     }
+    if (videoNodes){
+      videoNodes.srcObject = stream;
+    }
     return true;
   } catch (err){
     toast("Camera required", "Camera access required. Gallery uploads are not allowed.");
@@ -1642,11 +1760,11 @@ async function startCamera(){
 
 function ensureCameraReady(){
   if (!state.cameraReady){
-    toast("Camera required", "Start the camera before capturing proof.");
+    toast("Camera required", "Start the camera before capturing photos.");
     return false;
   }
   if (state.cameraInvalidated){
-    toast("Capture blocked", "Page focus changed. Restart the camera to capture proof.");
+    toast("Capture blocked", "Page focus changed. Restart the camera to capture photos.");
     return false;
   }
   return true;
@@ -1666,7 +1784,7 @@ async function captureFrame(){
     return null;
   }
   if (state.lastVisibilityChangeAt && state.cameraStartedAt && state.lastVisibilityChangeAt > state.cameraStartedAt){
-    toast("Capture blocked", "Page focus changed. Restart the camera to capture proof.");
+    toast("Capture blocked", "Page focus changed. Restart the camera to capture photos.");
     return null;
   }
   const gps = await captureGPS();
@@ -1692,84 +1810,6 @@ function makeFileFromBlob(blob){
   return new File([blob], `capture-${Date.now()}.jpg`, { type: "image/jpeg" });
 }
 
-async function submitSpliceProof(){
-  const node = state.activeNode;
-  if (!node) return;
-  const proof = state.pendingSpliceProof;
-  if (!proof){
-    toast("Proof required", "Capture a splice photo first.");
-    return;
-  }
-  if (!proof.gps){
-    toast("GPS required", "GPS is required for payment.");
-    return;
-  }
-
-  const loc = (node.splice_locations || []).find(l => !l.photo) || node.splice_locations?.[0];
-  if (!loc){
-    toast("No location", "Add a splice location first.");
-    return;
-  }
-
-    if (isDemo){
-      loc.photo = { kind:"local", url: proof.previewUrl, name: proof.file.name, size: proof.file.size };
-      loc.taken_at = nowISO();
-      loc.gps = { lat: proof.gps.lat, lng: proof.gps.lng, accuracy_m: proof.gps.accuracy_m };
-      toast("Proof saved", `Attached to: ${loc.name}`);
-      state.cameraInvalidated = false;
-      state.pendingSpliceProof = null;
-      renderLocations();
-      updateKPI();
-      renderProofChecklist();
-      renderProofPreview();
-      return;
-  }
-
-  const uploadPath = await uploadProofPhoto(proof.file, node.id, "splice");
-  if (!uploadPath) return;
-
-  const gps = proof.gps;
-  const { data, error } = await state.client
-    .from("splice_locations")
-    .update({
-      photo_path: uploadPath,
-      gps_lat: gps?.lat ?? null,
-      gps_lng: gps?.lng ?? null,
-      gps_accuracy_m: gps?.accuracy_m ?? null,
-    })
-    .eq("id", loc.id)
-    .select("id, photo_path, taken_at, gps_lat, gps_lng, gps_accuracy_m")
-    .maybeSingle();
-
-  if (error){
-    toast("Proof error", error.message);
-    return;
-  }
-
-  loc.photo = { kind:"storage", path: data.photo_path };
-  loc.taken_at = data.taken_at;
-  loc.gps = (data.gps_lat != null && data.gps_lng != null)
-    ? { lat: data.gps_lat, lng: data.gps_lng, accuracy_m: data.gps_accuracy_m }
-    : null;
-  toast("Proof saved", `Attached to: ${loc.name}`);
-  await recordProofUpload({
-    node_id: node.id,
-    splice_location_id: loc.id,
-    photo_url: data.photo_path,
-    lat: gps?.lat ?? null,
-    lng: gps?.lng ?? null,
-    captured_at_client: proof.captured_at,
-    camera: true,
-    captured_by: state.user?.id || null,
-  });
-  state.pendingSpliceProof = null;
-  state.cameraInvalidated = false;
-  renderLocations();
-  updateKPI();
-  renderProofChecklist();
-  renderProofPreview();
-}
-
 async function addSpliceLocation(){
   const node = state.activeNode;
   if (!node) return;
@@ -1783,6 +1823,7 @@ async function addSpliceLocation(){
       photo: null,
       taken_at: null,
       completed: false,
+      photos: { open: null, closed: null },
     });
     renderLocations();
     updateKPI();
@@ -1813,6 +1854,7 @@ async function addSpliceLocation(){
     photo: data.photo_path ? { kind:"storage", path:data.photo_path } : null,
     taken_at: data.taken_at,
     completed: data.completed,
+    photos: { open: null, closed: null },
   });
   renderLocations();
   updateKPI();
@@ -1850,6 +1892,10 @@ async function openNode(nodeNumber){
     state.unitTypes = state.demo.unitTypes || [];
     await loadAllowedQuantities(state.activeNode.id);
     await loadAlerts(state.activeNode.id);
+    state.activeNode.splice_locations = (state.activeNode.splice_locations || []).map((loc) => ({
+      ...loc,
+      photos: loc.photos || { open: null, closed: null },
+    }));
 
     // In real app, pricing is server-side protected.
     // Here we just display message.
@@ -1962,6 +2008,7 @@ async function openNode(nodeNumber){
     photo: r.photo_path ? { kind:"storage", path:r.photo_path } : null,
     taken_at: r.taken_at,
     completed: r.completed,
+    photos: { open: null, closed: null },
   }));
 
   node.inventory_checks = (invRes.data || []).map((r) => ({
@@ -1982,6 +2029,7 @@ async function openNode(nodeNumber){
 
   state.activeNode = node;
   await loadUsageEvents(node.id);
+  await loadSplicePhotos(node.id, node.splice_locations);
   await loadAllowedQuantities(node.id);
   await loadAlerts(node.id);
   subscribeUsageEvents(node.id);
@@ -2064,9 +2112,9 @@ async function markNodeReady(){
     toast("Not ready", "Finish all splice locations + inventory checklist first.");
     return;
   }
-  const proof = computeProofStatus(node);
-  if (!proof.proofOk){
-    toast("Proof required", "Upload proof (GPS + photo + timestamp) before marking the node ready.");
+  const photos = computeProofStatus(node);
+  if (!photos.photosOk){
+    toast("Photos required", "Take photos (GPS + photo + timestamp) before marking the node ready.");
     return;
   }
   if (isDemo){
@@ -2106,9 +2154,9 @@ async function createInvoice(){
     toast("Blocked", "Invoices are blocked until documentation is complete and node is marked READY.");
     return;
   }
-  const proof = computeProofStatus(node);
-  if (!proof.proofOk){
-    toast("Blocked", "Proof is required before invoice submission.");
+  const photos = computeProofStatus(node);
+  if (!photos.photosOk){
+    toast("Blocked", "Photos are required before invoice submission.");
     return;
   }
 
@@ -2375,26 +2423,19 @@ function wireUI(){
   }
 
   $("btnAddLocation").addEventListener("click", () => addSpliceLocation());
-  $("btnCaptureGPS").addEventListener("click", () => captureGPS());
-
-  const spliceCaptureBtn = $("btnCaptureSplice");
-  if (spliceCaptureBtn){
-    spliceCaptureBtn.addEventListener("click", () => captureSpliceProof());
-  }
-
-  const submitSpliceBtn = $("btnSubmitSpliceProof");
-  if (submitSpliceBtn){
-    submitSpliceBtn.addEventListener("click", () => submitSpliceProof());
-  }
 
   const startCameraBtn = $("btnStartCamera");
   if (startCameraBtn){
     startCameraBtn.addEventListener("click", () => startCamera());
   }
+  const startCameraNodesBtn = $("btnStartCameraNodes");
+  if (startCameraNodesBtn){
+    startCameraNodesBtn.addEventListener("click", () => startCamera());
+  }
 
-  const proofBtn = $("btnCaptureProof");
-  if (proofBtn){
-    proofBtn.addEventListener("click", () => captureUsageProof());
+  const photoBtn = $("btnCapturePhoto");
+  if (photoBtn){
+    photoBtn.addEventListener("click", () => captureUsageProof());
   }
 
   $("btnMarkNodeReady").addEventListener("click", () => markNodeReady());

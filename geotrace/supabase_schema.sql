@@ -246,6 +246,39 @@ create trigger trg_stamp_splice_taken_at
 before insert or update on public.splice_locations
 for each row execute function public.fn_stamp_splice_taken_at();
 
+create or replace function public.fn_require_splice_photos()
+returns trigger
+language plpgsql
+as $$
+declare
+  open_ok boolean;
+  closed_ok boolean;
+begin
+  if new.completed is true then
+    select exists (
+      select 1 from public.proof_uploads pu
+      where pu.splice_location_id = new.id
+        and pu.photo_type = 'open'
+    ) into open_ok;
+
+    select exists (
+      select 1 from public.proof_uploads pu
+      where pu.splice_location_id = new.id
+        and pu.photo_type = 'closed'
+    ) into closed_ok;
+
+    if not open_ok or not closed_ok then
+      raise exception 'Splice photos required before completion.';
+    end if;
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists trg_require_splice_photos on public.splice_locations;
+create trigger trg_require_splice_photos
+before update on public.splice_locations
+for each row execute function public.fn_require_splice_photos();
+
 -- 4) Inventory master (NO pricing fields here)
 create table if not exists public.inventory_items (
   id uuid primary key default gen_random_uuid(),
@@ -287,7 +320,7 @@ using (
   )
 );
 
--- 5) Node inventory checklist entries (qty + proof optional)
+-- 5) Node inventory checklist entries (qty + photo optional)
 create table if not exists public.node_inventory (
   id uuid primary key default gen_random_uuid(),
   node_id uuid not null references public.nodes(id) on delete cascade,
@@ -675,6 +708,8 @@ create table if not exists public.proof_uploads (
   captured_at_server timestamptz not null default now(),
   device_info text,
   camera boolean not null default false,
+  job_number text,
+  photo_type text,
   captured_by uuid references public.profiles(id),
   created_at timestamptz not null default now()
 );
@@ -685,7 +720,9 @@ alter table public.proof_uploads
   add column if not exists captured_at_client timestamptz,
   add column if not exists captured_at_server timestamptz not null default now(),
   add column if not exists device_info text,
-  add column if not exists camera boolean not null default false;
+  add column if not exists camera boolean not null default false,
+  add column if not exists job_number text,
+  add column if not exists photo_type text;
 
 create policy "proof_uploads_read_all_authed"
 on public.proof_uploads for select
@@ -709,16 +746,24 @@ language plpgsql
 as $$
 begin
   if new.camera is not true then
-    raise exception 'Camera capture required for proof.';
+    raise exception 'Camera capture required for photo.';
+  end if;
+  if new.job_number is null then
+    raise exception 'Job number required for photo.';
+  end if;
+  if new.splice_location_id is not null then
+    if new.photo_type is null or new.photo_type not in ('open','closed') then
+      raise exception 'Photo type required for splice photos.';
+    end if;
   end if;
   if new.lat is null or new.lng is null then
-    raise exception 'GPS required for proof.';
+    raise exception 'GPS required for photo.';
   end if;
   if new.captured_at_client is null then
-    raise exception 'Client timestamp required for proof.';
+    raise exception 'Client timestamp required for photo.';
   end if;
   if abs(extract(epoch from (now() - new.captured_at_client))) > 300 then
-    raise exception 'Proof timestamp too old.';
+    raise exception 'Photo timestamp too old.';
   end if;
   if new.captured_at_server is null then
     new.captured_at_server := now();
@@ -1028,9 +1073,14 @@ begin
   end if;
 
   select exists (
-    select 1 from public.splice_locations sl
+    select 1
+    from public.splice_locations sl
+    left join public.proof_uploads po
+      on po.splice_location_id = sl.id and po.photo_type = 'open'
+    left join public.proof_uploads pc
+      on pc.splice_location_id = sl.id and pc.photo_type = 'closed'
     where sl.node_id = new.node_id
-      and (sl.photo_path is null or sl.gps_lat is null or sl.taken_at is null)
+      and (po.id is null or pc.id is null)
   ) into missing_splice;
 
   select exists (
@@ -1041,7 +1091,7 @@ begin
   ) into missing_usage;
 
   if missing_splice or missing_usage then
-    raise exception 'Proof required before invoice submission.';
+    raise exception 'Photos required before invoice submission.';
   end if;
 
   return new;
@@ -1071,8 +1121,10 @@ select
   n.used_units,
   n.ready_for_billing,
   (select bool_and(sl.completed) from public.splice_locations sl where sl.node_id = n.id) as all_splice_locations_complete,
-  (select bool_and(sl.photo_path is not null and sl.gps_lat is not null and sl.taken_at is not null)
-   from public.splice_locations sl where sl.node_id = n.id) as all_splice_proof_complete,
+  (select bool_and(
+     exists (select 1 from public.proof_uploads po where po.splice_location_id = sl.id and po.photo_type = 'open')
+     and exists (select 1 from public.proof_uploads pc where pc.splice_location_id = sl.id and pc.photo_type = 'closed')
+   ) from public.splice_locations sl where sl.node_id = n.id) as all_splice_photos_complete,
   (select bool_and(ni.completed) from public.node_inventory ni where ni.node_id = n.id) as all_inventory_complete,
   (select bool_and(
      coalesce(ue.proof_required, true) = false
