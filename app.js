@@ -9,9 +9,19 @@ const state = {
   profile: null, // {role, display_name}
   activeProject: null,
   activeNode: null,
+  projectNodes: [],
   lastGPS: null,
   lastProof: null,
+  cameraStream: null,
+  cameraReady: false,
+  cameraInvalidated: false,
+  cameraStartedAt: null,
+  lastVisibilityChangeAt: null,
   usageEvents: [],
+  unitTypes: [],
+  allowedQuantities: [],
+  alerts: [],
+  materialCatalog: [],
   projects: [],
   realtime: {
     usageChannel: null,
@@ -20,8 +30,13 @@ const state = {
     roles: ["TDS", "PRIME", "SUB", "SPLICER", "OWNER"],
     role: "SPLICER",
     nodes: {},
+    nodesList: [],
     invoices: [],
     usageEvents: [],
+    unitTypes: [],
+    allowedQuantities: [],
+    alerts: [],
+    materialCatalog: [],
   },
 };
 
@@ -33,6 +48,75 @@ function toast(title, body){
 }
 
 function nowISO(){ return new Date().toISOString(); }
+
+const DEFAULT_TERMINAL_PORTS = 2;
+const MAX_TERMINAL_PORTS = 8;
+
+function normalizeTerminalPorts(value){
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_TERMINAL_PORTS;
+  return Math.min(MAX_TERMINAL_PORTS, Math.max(1, parsed));
+}
+
+function requiredSlotsForPorts(ports){
+  const count = normalizeTerminalPorts(ports);
+  const slots = [];
+  for (let i = 1; i <= count; i += 1){
+    slots.push(`port_${i}`);
+  }
+  slots.push("splice_completion");
+  return slots;
+}
+
+function getSlotLabel(slotKey){
+  if (slotKey === "splice_completion") return "Splice completion";
+  const match = String(slotKey || "").match(/^port_(\d+)$/);
+  if (match) return `Port ${match[1]}`;
+  return slotKey;
+}
+
+function getRequiredSlotsForLocation(loc){
+  return requiredSlotsForPorts(loc?.terminal_ports ?? DEFAULT_TERMINAL_PORTS);
+}
+
+function countRequiredSlotUploads(loc){
+  const required = getRequiredSlotsForLocation(loc);
+  const photos = loc?.photosBySlot || {};
+  let uploaded = 0;
+  required.forEach((slot) => {
+    if (photos[slot]) uploaded += 1;
+  });
+  return { uploaded, required: required.length };
+}
+
+function hasAllRequiredSlotPhotos(loc){
+  const required = getRequiredSlotsForLocation(loc);
+  const photos = loc?.photosBySlot || {};
+  return required.length > 0 && required.every((slot) => Boolean(photos[slot]));
+}
+
+function setText(id, value){
+  const el = $(id);
+  if (el) el.textContent = value;
+}
+
+function setActiveView(viewId){
+  document.querySelectorAll(".view").forEach((view) => {
+    view.classList.toggle("active", view.id === viewId);
+  });
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.view === viewId);
+  });
+}
+
+function startVisibilityWatch(){
+  document.addEventListener("visibilitychange", () => {
+    state.lastVisibilityChangeAt = Date.now();
+    if (document.hidden){
+      state.cameraInvalidated = true;
+    }
+  });
+}
 
 function getRole(){
   return state.profile?.role || state.demo.role;
@@ -54,28 +138,48 @@ function computeNodeCompletion(node){
   return { locOk, invOk, pct };
 }
 
+function computeProofStatus(node){
+  const locs = node.splice_locations || [];
+  const locPhotosOk = locs.length > 0 && locs.every((l) => hasAllRequiredSlotPhotos(l));
+  const missingUsage = getMissingUsageProof(node.id);
+  const usagePhotosOk = missingUsage.length === 0;
+  return { locPhotosOk, usagePhotosOk, photosOk: locPhotosOk && usagePhotosOk };
+}
+
 function updateKPI(){
   const node = state.activeNode;
   if (!node){
-    $("kpiNode").textContent = "None";
-    $("kpiCompletion").textContent = "0%";
-    $("kpiUnits").textContent = "0 / 0";
-    $("chipStatus").innerHTML = '<span class="dot warn"></span><span>Waiting</span>';
+    setText("kpiNode", "None");
+    setText("kpiCompletion", "0%");
+    setText("kpiUnits", "0 / 0");
+    setText("dashNode", "None");
+    setText("dashCompletion", "0%");
+    setText("dashUnits", "0 / 0");
+    const chipStatus = $("chipStatus");
+    if (chipStatus){
+      chipStatus.innerHTML = '<span class="dot warn"></span><span>Waiting</span>';
+    }
     return;
   }
 
-  $("kpiNode").textContent = node.node_number;
+  setText("kpiNode", node.node_number);
+  setText("dashNode", node.node_number);
   const c = computeNodeCompletion(node);
-  $("kpiCompletion").textContent = `${c.pct}%`;
+  setText("kpiCompletion", `${c.pct}%`);
+  setText("dashCompletion", `${c.pct}%`);
 
   const units = getNodeUnits(node);
-  $("kpiUnits").textContent = `${units.used} / ${units.allowed}`;
+  setText("kpiUnits", `${units.used} / ${units.allowed}`);
+  setText("dashUnits", `${units.used} / ${units.allowed}`);
 
   // status chip
   const ratio = units.allowed > 0 ? (units.used / units.allowed) : 0;
   const dot = c.pct === 100 ? "ok" : ratio >= 0.9 ? "warn" : "warn";
   const label = c.pct === 100 ? "Ready" : "In progress";
-  $("chipStatus").innerHTML = `<span class="dot ${dot}"></span><span>${label}</span>`;
+  const chipStatus = $("chipStatus");
+  if (chipStatus){
+    chipStatus.innerHTML = `<span class="dot ${dot}"></span><span>${label}</span>`;
+  }
 
   // unit alert
   if (units.allowed > 0){
@@ -102,6 +206,9 @@ function setRoleUI(){
   if (seedBtn){
     seedBtn.style.display = (!isDemo && canSeedDemo()) ? "" : "none";
   }
+
+  updateAlertsBadge();
+  renderAlerts();
 }
 
 function showAuth(show){
@@ -111,17 +218,17 @@ function showAuth(show){
 
 function setWhoami(){
   if (isDemo){
-    $("whoami").textContent = `Demo -> ${state.demo.role}`;
+    $("whoami").textContent = `Signed in (Demo: ${state.demo.role})`;
     $("btnSignOut").style.display = "";
     return;
   }
 
   if (state.user){
     const role = state.profile?.role ? ` -> ${state.profile.role}` : "";
-    $("whoami").textContent = `${state.user.email}${role}`;
+    $("whoami").textContent = `Signed in (${state.user.email}${role})`;
     $("btnSignOut").style.display = "";
   } else {
-    $("whoami").textContent = "Not signed in";
+    $("whoami").textContent = "Signed out";
     $("btnSignOut").style.display = "none";
   }
 }
@@ -129,15 +236,49 @@ function setWhoami(){
 function ensureDemoSeed(){
   if (Object.keys(state.demo.nodes).length) return;
 
-  // One seeded node
+  const project = {
+    id: "demo-project-ruidoso",
+    name: "Ruidoso FTTH Rebuild",
+    location: "Ruidoso, NM",
+    job_number: "731022136",
+  };
+  state.demo.project = project;
+
+  const nodes = [
+    {
+      id: "demo-node-11",
+      node_number: "NODE 11",
+      description: "Ruidoso Node 11 (FTTH)",
+      status: "ACTIVE",
+    },
+    {
+      id: "demo-node-54",
+      node_number: "NODE 54",
+      description: "Ruidoso Node 54 (FTTH)",
+      status: "NOT_STARTED",
+    },
+    {
+      id: "demo-node-x1",
+      node_number: "NODE TBD-1",
+      description: "Placeholder node (rename later)",
+      status: "NOT_STARTED",
+    },
+    {
+      id: "demo-node-x2",
+      node_number: "NODE TBD-2",
+      description: "Placeholder node (rename later)",
+      status: "NOT_STARTED",
+    },
+  ];
+  state.demo.nodesList = nodes.map((n) => ({ ...n, project_id: project.id }));
+
   const node = {
-    id: "demo-node-1",
-    node_number: "NODE-1001",
+    ...nodes[0],
     units_allowed: 120,
     units_used: 103,
     splice_locations: [
-      { id:"loc-1", name:"Cabinet A - Tray 1", gps:null, photo:null, taken_at:null, completed:false },
-      { id:"loc-2", name:"Pedestal 12B - Splice Case", gps:null, photo:null, taken_at:null, completed:false },
+      { id:"loc-1", name:"Cabinet A - Tray 1", gps:null, photo:null, taken_at:null, completed:false, terminal_ports: 2, photosBySlot: {} },
+      { id:"loc-2", name:"Pedestal 12B - Splice Case", gps:null, photo:null, taken_at:null, completed:false, terminal_ports: 4, photosBySlot: {} },
     ],
     inventory_checks: [
       { id:"inv-1", item_code:"HAFO(OFDC-B8G)", item_name:"TDS Millennium example", photo:"./assets/millennium_example.png", qty_used: 2, planned_qty: 12, completed:false },
@@ -146,9 +287,92 @@ function ensureDemoSeed(){
     ready_for_billing: false,
   };
   state.demo.nodes[node.node_number] = node;
+  nodes.slice(1).forEach((n) => {
+    state.demo.nodes[n.node_number] = {
+      ...n,
+      units_allowed: 0,
+      units_used: 0,
+      splice_locations: [],
+      inventory_checks: [],
+      ready_for_billing: false,
+    };
+  });
 
   state.demo.invoices = [
-    { id:"inv-demo-1", node_number:"NODE-1001", from:"SUB", to:"PRIME", status:"Draft", amount_hidden:true },
+    { id:"inv-demo-1", node_number:"NODE 11", from:"SUB", to:"PRIME", status:"Draft", amount_hidden:true },
+  ];
+
+  state.demo.unitTypes = [
+    { id:"ut-ho-1", code:"HO-1", description:"Fiber housing 1" },
+    { id:"ut-ho-2", code:"HO-2", description:"Fiber housing 2" },
+    { id:"ut-splice", code:"SPLICE", description:"Splice unit" },
+  ];
+
+  state.demo.allowedQuantities = [
+    {
+      id: "aq-1",
+      node_id: node.id,
+      unit_type_id: "ut-ho-1",
+      allowed_qty: 362,
+      alert_threshold_pct: 0.15,
+      alert_threshold_abs: 50,
+    },
+  ];
+
+  state.demo.usageEvents = [
+    {
+      id: "use-1",
+      node_id: node.id,
+      item_id: null,
+      unit_type_id: "ut-ho-1",
+      qty: 320,
+      status: "approved",
+      captured_at: nowISO(),
+      captured_at_client: nowISO(),
+      gps_lat: 32.123456,
+      gps_lng: -104.987654,
+      photo_path: "demo-only",
+      proof_required: true,
+    },
+  ];
+
+  state.demo.materialCatalog = [
+    {
+      id: "mc-1",
+      millennium_part: "HAFO(OFDC-B8G)",
+      mfg_sku: "MFG-HAFO-B8G",
+      description: "TDS Millennium housing assembly (8G)",
+      photo_url: "./assets/millennium_example.png",
+    },
+    {
+      id: "mc-2",
+      millennium_part: "HxFO(1X2)PCOT(80/20)MO",
+      mfg_sku: "MFG-1X2-8020",
+      description: "Splitter module 1x2, 80/20",
+      photo_url: "./assets/millennium_example.png",
+    },
+    {
+      id: "mc-3",
+      millennium_part: "PF3-3",
+      mfg_sku: "MFG-PF3-3",
+      description: "PF3-3 splice tray kit",
+      photo_url: "./assets/millennium_example.png",
+    },
+  ];
+
+  state.demo.alerts = [
+    {
+      id: "alert-1",
+      node_id: node.id,
+      unit_type_id: "ut-ho-1",
+      allowed_qty: 362,
+      used_qty: 320,
+      remaining_qty: 42,
+      message: "Remaining units below threshold. Request approval for additional units.",
+      severity: "warning",
+      status: "open",
+      created_at: nowISO(),
+    },
   ];
 }
 
@@ -165,25 +389,36 @@ function renderProjects(){
   state.projects.forEach((p) => {
     const o = document.createElement("option");
     o.value = p.id;
-    o.textContent = p.name;
+    o.textContent = p.job_number ? `${p.name} (Job ${p.job_number})` : p.name;
     select.appendChild(o);
   });
 
   if (state.activeProject){
     select.value = state.activeProject.id;
     if (meta){
-      meta.textContent = state.activeProject.location ? `Location: ${state.activeProject.location}` : "";
+      const job = state.activeProject.job_number ? `Job ${state.activeProject.job_number}` : "Job -";
+      const loc = state.activeProject.location ? ` | ${state.activeProject.location}` : "";
+      meta.textContent = `${job}${loc}`;
     }
+    setText("jobTitle", state.activeProject.job_number ? `Job ${state.activeProject.job_number}` : "Job -");
+    setText("jobSubtitle", state.activeProject.name || "Project");
   } else if (meta){
     meta.textContent = "";
+    setText("jobTitle", "Job -");
+    setText("jobSubtitle", "Project");
   }
 }
 
 async function loadProjects(){
-  if (isDemo) return;
+  if (isDemo){
+    state.projects = state.demo.project ? [state.demo.project] : [];
+    state.activeProject = state.projects[0] || null;
+    renderProjects();
+    return;
+  }
   const { data, error } = await state.client
     .from("projects")
-    .select("id, name, location")
+    .select("id, name, location, job_number")
     .order("name");
   if (error){
     toast("Projects load error", error.message);
@@ -197,10 +432,238 @@ async function loadProjects(){
   renderProjects();
 }
 
+async function loadProjectNodes(projectId){
+  if (isDemo){
+    state.projectNodes = (state.demo.nodesList || []).filter(n => !projectId || n.project_id === projectId);
+    renderNodeCards();
+    return;
+  }
+  if (!projectId){
+    state.projectNodes = [];
+    renderNodeCards();
+    return;
+  }
+  const { data, error } = await state.client
+    .from("nodes")
+    .select("id, node_number, description, status, started_at, completed_at, project_id")
+    .eq("project_id", projectId)
+    .order("node_number");
+  if (error){
+    toast("Nodes load error", error.message);
+    return;
+  }
+  state.projectNodes = data || [];
+  renderNodeCards();
+}
+
+function renderNodeCards(){
+  const wrap = $("nodeCards");
+  if (!wrap) return;
+  if (!state.projectNodes.length){
+    wrap.innerHTML = '<div class="muted small">Select a project to see nodes.</div>';
+    return;
+  }
+  const activeNode = state.projectNodes.find(n => n.status === "ACTIVE");
+  wrap.innerHTML = state.projectNodes.map((node) => {
+    const status = node.status || "NOT_STARTED";
+    const isActive = status === "ACTIVE";
+    const isComplete = status === "COMPLETE";
+    const canStart = !activeNode || activeNode.id === node.id || isComplete;
+    const actionLabel = isComplete ? "Completed" : isActive ? "Continue" : "Start";
+    const disabled = !canStart && !isActive;
+    const completeDisabled = !isActive && !isComplete;
+    return `
+      <div class="node-card">
+        <div class="node-meta">
+          <div class="node-title">${escapeHtml(node.node_number)}</div>
+          <div class="muted small">${escapeHtml(node.description || "Ruidoso FTTH node")}</div>
+        </div>
+        <div class="node-status ${status.toLowerCase()}">${status.replace("_", " ")}</div>
+        <div class="row">
+          <button class="btn ${isActive ? "" : "secondary"}" data-action="openNode" data-id="${node.id}" ${disabled ? "disabled" : ""}>${actionLabel}</button>
+          <button class="btn ghost" data-action="completeNode" data-id="${node.id}" ${completeDisabled ? "disabled" : ""}>Complete</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function getActiveProjectNode(){
+  return state.projectNodes.find(n => n.status === "ACTIVE") || null;
+}
+
+async function startNode(nodeId){
+  const node = state.projectNodes.find(n => n.id === nodeId);
+  if (!node){
+    toast("Node missing", "Node not found.");
+    return;
+  }
+  const active = getActiveProjectNode();
+  if (active && active.id !== nodeId && active.status !== "COMPLETE"){
+    toast("Active node in progress", `Finish ${active.node_number} before starting another node.`);
+    return;
+  }
+  if (isDemo){
+    node.status = "ACTIVE";
+    node.started_at = nowISO();
+    state.demo.nodes[node.node_number].status = "ACTIVE";
+    state.activeNode = state.demo.nodes[node.node_number];
+    renderNodeCards();
+    await openNode(node.node_number);
+    setActiveView("viewNodes");
+    return;
+  }
+  const { error } = await state.client
+    .from("nodes")
+    .update({ status: "ACTIVE", started_at: new Date().toISOString() })
+    .eq("id", node.id);
+  if (error){
+    toast("Start failed", error.message);
+    return;
+  }
+  node.status = "ACTIVE";
+  await openNode(node.node_number);
+  await loadProjectNodes(node.project_id);
+  setActiveView("viewNodes");
+}
+
+async function completeNode(nodeId){
+  const node = state.projectNodes.find(n => n.id === nodeId);
+  if (!node){
+    toast("Node missing", "Node not found.");
+    return;
+  }
+  const role = getRole();
+  if (!(role === "PRIME" || role === "OWNER")){
+    toast("Not allowed", "Only PRIME/OWNER can complete a node.");
+    return;
+  }
+  if (!state.activeNode || state.activeNode.node_number !== node.node_number){
+    toast("Open node", "Open the node before marking it complete.");
+    return;
+  }
+  const photos = computeProofStatus(state.activeNode);
+  if (!photos.photosOk){
+    toast("No pay", "Photos missing. Completion is blocked.");
+    return;
+  }
+  if (isDemo){
+    node.status = "COMPLETE";
+    node.completed_at = nowISO();
+    state.demo.nodes[node.node_number].status = "COMPLETE";
+    renderNodeCards();
+    return;
+  }
+  const { error } = await state.client
+    .from("nodes")
+    .update({ status: "COMPLETE", completed_at: new Date().toISOString() })
+    .eq("id", node.id);
+  if (error){
+    toast("Complete failed", error.message);
+    return;
+  }
+  node.status = "COMPLETE";
+  await loadProjectNodes(node.project_id);
+}
+
+async function loadUnitTypes(){
+  if (isDemo){
+    state.unitTypes = state.demo.unitTypes || [];
+    return;
+  }
+  const { data, error } = await state.client
+    .from("unit_types")
+    .select("id, code, description")
+    .order("code");
+  if (error){
+    toast("Unit types error", error.message);
+    return;
+  }
+  state.unitTypes = data || [];
+}
+
+async function loadAllowedQuantities(nodeId){
+  if (isDemo){
+    state.allowedQuantities = (state.demo.allowedQuantities || [])
+      .filter(a => !nodeId || a.node_id === nodeId)
+      .map((row) => {
+        const unit = getUnitTypeMeta(row.unit_type_id);
+        return {
+          ...row,
+          unit_code: unit.code,
+          unit_description: unit.description,
+        };
+      });
+    return;
+  }
+  if (!nodeId){
+    state.allowedQuantities = [];
+    return;
+  }
+  const { data, error } = await state.client
+    .from("allowed_quantities")
+    .select("id, node_id, unit_type_id, allowed_qty, alert_threshold_pct, alert_threshold_abs, unit_types(code, description)")
+    .eq("node_id", nodeId);
+  if (error){
+    toast("Allowed qty error", error.message);
+    return;
+  }
+  state.allowedQuantities = (data || []).map((row) => ({
+    id: row.id,
+    node_id: row.node_id,
+    unit_type_id: row.unit_type_id,
+    unit_code: row.unit_types?.code || "-",
+    unit_description: row.unit_types?.description || "",
+    allowed_qty: row.allowed_qty,
+    alert_threshold_pct: row.alert_threshold_pct,
+    alert_threshold_abs: row.alert_threshold_abs,
+  }));
+}
+
+async function loadMaterialCatalog(){
+  if (isDemo){
+    state.materialCatalog = state.demo.materialCatalog || [];
+    return;
+  }
+  const { data, error } = await state.client
+    .from("material_catalog")
+    .select("id, millennium_part, mfg_sku, description, photo_url")
+    .eq("active", true)
+    .order("millennium_part");
+  if (error){
+    toast("Catalog error", error.message);
+    return;
+  }
+  state.materialCatalog = data || [];
+}
+
+async function loadAlerts(nodeId){
+  if (isDemo){
+    state.alerts = (state.demo.alerts || []).filter(a => !nodeId || a.node_id === nodeId);
+    updateAlertsBadge();
+    return;
+  }
+  let query = state.client
+    .from("alerts")
+    .select("id, node_id, unit_type_id, allowed_qty, used_qty, remaining_qty, message, severity, status, created_at, unit_types(code)")
+    .order("created_at", { ascending: false });
+  if (nodeId){
+    query = query.eq("node_id", nodeId);
+  }
+  const { data, error } = await query;
+  if (error){
+    toast("Alerts error", error.message);
+    return;
+  }
+  state.alerts = data || [];
+  updateAlertsBadge();
+}
+
 function setActiveProjectById(id){
   const next = state.projects.find(p => p.id === id) || null;
   state.activeProject = next;
   renderProjects();
+  loadProjectNodes(state.activeProject?.id || null);
 }
 
 function canSeedDemo(){
@@ -215,31 +678,49 @@ async function seedDemoNode(){
     return;
   }
 
-  const projectName = "Ruidoso Fire Rebuild (Demo)";
+  const projectName = "Ruidoso FTTH Rebuild";
   const projectLocation = "Ruidoso, NM";
+  const projectJob = "731022136";
 
   const { data: project, error: projectErr } = await state.client
     .from("projects")
-    .upsert({ name: projectName, location: projectLocation }, { onConflict: "name" })
-    .select("id, name, location")
+    .upsert({ name: projectName, location: projectLocation, job_number: projectJob }, { onConflict: "name" })
+    .select("id, name, location, job_number")
     .maybeSingle();
   if (projectErr){
     toast("Project seed failed", projectErr.message);
     return;
   }
 
-  const { data: node, error: nodeErr } = await state.client
+  const nodeSeed = [
+    { node_number: "NODE 11", description: "Ruidoso Node 11 (FTTH)" },
+    { node_number: "NODE 54", description: "Ruidoso Node 54 (FTTH)" },
+    { node_number: "NODE TBD-1", description: "Placeholder node (rename later)" },
+    { node_number: "NODE TBD-2", description: "Placeholder node (rename later)" },
+  ];
+
+  const { data: nodeRows, error: nodeErr } = await state.client
     .from("nodes")
-    .upsert({
-      node_number: "NODE 11",
-      project_id: project.id,
-      allowed_units: 0,
-      used_units: 0,
-    }, { onConflict: "node_number" })
-    .select("id, node_number, project_id")
-    .maybeSingle();
+    .upsert(
+      nodeSeed.map((n) => ({
+        node_number: n.node_number,
+        description: n.description,
+        project_id: project.id,
+        allowed_units: 0,
+        used_units: 0,
+        status: n.node_number === "NODE 11" ? "ACTIVE" : "NOT_STARTED",
+      })),
+      { onConflict: "node_number" }
+    )
+    .select("id, node_number, project_id");
   if (nodeErr){
     toast("Node seed failed", nodeErr.message);
+    return;
+  }
+
+  const node = (nodeRows || []).find(n => n.node_number === "NODE 11");
+  if (!node){
+    toast("Node seed failed", "Missing NODE 11 after seed.");
     return;
   }
 
@@ -309,11 +790,43 @@ async function seedDemoNode(){
     }
   }
 
+  const { data: unitRows, error: unitErr } = await state.client
+    .from("unit_types")
+    .upsert(
+      items.map(i => ({ code: i.code, description: i.name })),
+      { onConflict: "code" }
+    )
+    .select("id, code");
+  if (unitErr){
+    toast("Unit types seed failed", unitErr.message);
+    return;
+  }
+
+  const unitMap = new Map((unitRows || []).map(r => [r.code, r.id]));
+  const allowedRows = items.map((i) => ({
+    node_id: node.id,
+    unit_type_id: unitMap.get(i.code),
+    allowed_qty: i.planned_qty,
+    alert_threshold_pct: 0.15,
+    alert_threshold_abs: 50,
+  })).filter(r => r.unit_type_id);
+
+  if (allowedRows.length){
+    const { error } = await state.client
+      .from("allowed_quantities")
+      .upsert(allowedRows, { onConflict: "node_id,unit_type_id" });
+    if (error){
+      toast("Allowed qty seed failed", error.message);
+      return;
+    }
+  }
+
   await loadProjects();
   state.activeProject = project;
   renderProjects();
   $("nodeNumber").value = "NODE 11";
   await openNode("NODE 11");
+  await loadProjectNodes(project.id);
   toast("Demo loaded", "Project and NODE 11 are ready.");
 }
 
@@ -332,47 +845,84 @@ function renderLocations(){
     return;
   }
 
-  const table = document.createElement("table");
-  table.className = "table";
-  table.innerHTML = `
-    <thead>
-      <tr>
-        <th>Location</th>
-        <th>GPS</th>
-        <th>Photo</th>
-        <th>Timestamp</th>
-        <th>Done</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  `;
-  const tb = table.querySelector("tbody");
-
+  const list = document.createElement("div");
+  list.className = "location-list";
   rows.forEach((r) => {
-    const gps = r.gps ? `${r.gps.lat.toFixed(6)}, ${r.gps.lng.toFixed(6)}` : "-";
-    const photo = r.photo ? "attached" : "-";
-    const ts = r.taken_at ? new Date(r.taken_at).toLocaleString() : "-";
-    const done = r.completed ? '<span class="pill-ok">YES</span>' : '<span class="pill-warn">NO</span>';
+    r.terminal_ports = normalizeTerminalPorts(r.terminal_ports ?? DEFAULT_TERMINAL_PORTS);
+    r.photosBySlot = r.photosBySlot || {};
+    const portValue = [2, 4, 6, 8].includes(r.terminal_ports) ? String(r.terminal_ports) : "custom";
+    const customValue = portValue === "custom" ? r.terminal_ports : "";
+    const customStyle = portValue === "custom" ? "" : 'style="display:none;"';
+    const counts = countRequiredSlotUploads(r);
+    const missing = counts.uploaded < counts.required;
+    const disableToggle = !r.completed && missing;
+    const done = r.completed ? '<span class="pill-ok">COMPLETE</span>' : '<span class="pill-warn">INCOMPLETE</span>';
 
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>
-        <div style="font-weight:900">${escapeHtml(r.name)}</div>
-        <div class="muted small">${escapeHtml(r.id)}</div>
-      </td>
-      <td>${gps}</td>
-      <td>${photo}</td>
-      <td>${ts}</td>
-      <td>
-        <div class="row">
-          <button class="btn secondary small" data-action="toggleComplete" data-id="${r.id}">${r.completed ? "Undo" : "Mark complete"}</button>
+    const card = document.createElement("div");
+    card.className = "card location-card";
+    card.innerHTML = `
+      <div class="row" style="justify-content:space-between;">
+        <div>
+          <div style="font-weight:900">${escapeHtml(r.name)}</div>
+          <div class="muted small">${escapeHtml(r.id)}</div>
+          <div class="muted small">Photos: <b>${counts.uploaded}/${counts.required}</b> required</div>
         </div>
-      </td>
+        <div>${done}</div>
+      </div>
+      <div class="hr"></div>
+      <div class="row" style="align-items:flex-end;">
+        <div class="muted small">Terminal ports</div>
+        <select class="input" data-action="portsSelect" data-id="${r.id}" style="width:140px; flex:0 0 auto;">
+          <option value="2" ${portValue === "2" ? "selected" : ""}>2</option>
+          <option value="4" ${portValue === "4" ? "selected" : ""}>4</option>
+          <option value="6" ${portValue === "6" ? "selected" : ""}>6</option>
+          <option value="8" ${portValue === "8" ? "selected" : ""}>8</option>
+          <option value="custom" ${portValue === "custom" ? "selected" : ""}>Custom</option>
+        </select>
+        <input class="input" type="number" min="1" max="8" step="1" data-action="portsCustom" data-id="${r.id}" value="${customValue}" ${customStyle} style="width:120px; flex:0 0 auto;" />
+        <div class="muted small">Required = ports + 1 completion.</div>
+      </div>
+      <div class="hr"></div>
+      ${renderSplicePhotoGrid(r)}
+      <div class="hr"></div>
+      <div class="row">
+        <button class="btn ghost" data-action="toggleComplete" data-id="${r.id}" ${disableToggle ? "disabled" : ""}>${r.completed ? "Undo complete" : "Mark complete"}</button>
+      </div>
     `;
-    tb.appendChild(tr);
+    list.appendChild(card);
   });
 
-  table.addEventListener("click", async (e) => {
+  list.addEventListener("change", async (e) => {
+    const target = e.target;
+    if (!target) return;
+    if (target.matches('input[type="file"][data-slot-key]')){
+      const locId = target.dataset.locationId;
+      const slotKey = target.dataset.slotKey;
+      const file = target.files?.[0];
+      await handleSpliceSlotPhotoUpload(locId, slotKey, file);
+      target.value = "";
+      return;
+    }
+    if (target.dataset.action === "portsSelect"){
+      const loc = node.splice_locations.find(x => x.id === target.dataset.id);
+      if (!loc) return;
+      if (target.value === "custom"){
+        loc.terminal_ports = normalizeTerminalPorts(loc.terminal_ports ?? DEFAULT_TERMINAL_PORTS);
+        renderLocations();
+        return;
+      }
+      const nextPorts = normalizeTerminalPorts(target.value);
+      await updateTerminalPorts(loc.id, nextPorts);
+      return;
+    }
+    if (target.dataset.action === "portsCustom"){
+      const nextPorts = normalizeTerminalPorts(target.value);
+      target.value = String(nextPorts);
+      await updateTerminalPorts(target.dataset.id, nextPorts);
+    }
+  });
+
+  list.addEventListener("click", async (e) => {
     const btn = e.target.closest("button");
     if (!btn) return;
     const action = btn.dataset.action;
@@ -380,19 +930,16 @@ function renderLocations(){
     if (action === "toggleComplete"){
       const loc = node.splice_locations.find(x => x.id === id);
       if (!loc) return;
-
-      // Must have gps + photo + timestamp
-      if (!loc.completed){
-        if (!loc.gps || !loc.photo || !loc.taken_at){
-          toast("Missing evidence", "This splice location needs GPS, photo, and timestamp before it can be completed.");
-          return;
-        }
+      if (!hasAllRequiredSlotPhotos(loc)){
+        toast("Photos required", "All required splice photos are needed before completion.");
+        return;
       }
       const next = !loc.completed;
       if (isDemo){
         loc.completed = next;
         renderLocations();
         updateKPI();
+        renderProofChecklist();
         return;
       }
       const { error } = await state.client
@@ -406,10 +953,157 @@ function renderLocations(){
       loc.completed = next;
       renderLocations();
       updateKPI();
+      renderProofChecklist();
     }
   });
 
-  wrap.appendChild(table);
+  wrap.appendChild(list);
+}
+
+function renderSplicePhotoGrid(loc){
+  const requiredSlots = getRequiredSlotsForLocation(loc);
+  const photos = loc.photosBySlot || {};
+  const extraSlots = Object.keys(photos).filter((slot) => !requiredSlots.includes(slot));
+  const orderedExtras = extraSlots.sort((a, b) => {
+    const aNum = Number.parseInt(String(a).replace("port_", ""), 10);
+    const bNum = Number.parseInt(String(b).replace("port_", ""), 10);
+    if (Number.isFinite(aNum) && Number.isFinite(bNum)) return aNum - bNum;
+    return String(a).localeCompare(String(b));
+  });
+  const slots = requiredSlots.concat(orderedExtras);
+  return `
+    <div class="photo-grid">
+      ${slots.map((slotKey) => renderSpliceSlotCard(loc, slotKey, requiredSlots.includes(slotKey))).join("")}
+    </div>
+  `;
+}
+
+function renderSpliceSlotCard(loc, slotKey, isRequired){
+  const photo = loc.photosBySlot?.[slotKey];
+  const label = getSlotLabel(slotKey);
+  const badge = isRequired ? "" : '<span class="slot-badge">Extra</span>';
+  const timestamp = photo?.taken_at ? new Date(photo.taken_at).toLocaleString() : "";
+  const thumb = photo?.previewUrl
+    ? `<img class="slot-thumb" src="${photo.previewUrl}" alt="${escapeHtml(label)} photo"/>`
+    : photo
+      ? `<div class="muted small">Photo captured</div>`
+      : "";
+  const placeholder = `
+    <div class="slot-placeholder">
+      <div class="camera-icon" aria-hidden="true"></div>
+      <div class="muted small">Tap to capture</div>
+    </div>
+  `;
+  return `
+    <label class="photo-slot ${isRequired ? "" : "extra"}">
+      <input type="file" accept="image/*" capture="environment" data-location-id="${loc.id}" data-slot-key="${slotKey}" />
+      <div class="row" style="justify-content:space-between; width:100%;">
+        <div class="slot-title">${escapeHtml(label)}</div>
+        ${badge}
+      </div>
+      ${photo ? `
+        ${thumb}
+        <div class="slot-meta">${timestamp || "Timestamp pending"}</div>
+      ` : placeholder}
+    </label>
+  `;
+}
+
+async function updateTerminalPorts(locationId, nextPorts){
+  const node = state.activeNode;
+  if (!node) return;
+  const loc = node.splice_locations.find(x => x.id === locationId);
+  if (!loc) return;
+  const normalized = normalizeTerminalPorts(nextPorts);
+  if (normalized === loc.terminal_ports) return;
+  if (isDemo){
+    loc.terminal_ports = normalized;
+    renderLocations();
+    renderProofChecklist();
+    return;
+  }
+  const { error } = await state.client
+    .from("splice_locations")
+    .update({ terminal_ports: normalized })
+    .eq("id", loc.id);
+  if (error){
+    toast("Update failed", error.message);
+    return;
+  }
+  loc.terminal_ports = normalized;
+  renderLocations();
+  renderProofChecklist();
+}
+
+async function handleSpliceSlotPhotoUpload(locationId, slotKey, file){
+  const node = state.activeNode;
+  if (!node) return;
+  if (!file){
+    toast("Choose a photo", "Pick a photo file first.");
+    return;
+  }
+  const loc = node.splice_locations.find(l => l.id === locationId);
+  if (!loc){
+    toast("Location missing", "Splice location not found.");
+    return;
+  }
+  const takenAt = nowISO();
+  const previewUrl = URL.createObjectURL(file);
+  loc.photosBySlot = loc.photosBySlot || {};
+  loc.photosBySlot[slotKey] = { previewUrl, taken_at: takenAt, pending: true };
+  renderLocations();
+  renderProofChecklist();
+
+  if (isDemo){
+    loc.photosBySlot[slotKey] = { previewUrl, taken_at: takenAt };
+    renderLocations();
+    renderProofChecklist();
+    return;
+  }
+
+  const uploadPath = await uploadProofPhoto(file, node.id, `splice-location/${locationId}`);
+  if (!uploadPath){
+    delete loc.photosBySlot[slotKey];
+    renderLocations();
+    renderProofChecklist();
+    return;
+  }
+
+  const gps = state.lastGPS;
+  const { data, error } = await state.client
+    .from("splice_location_photos")
+    .upsert({
+      splice_location_id: loc.id,
+      slot_key: slotKey,
+      photo_path: uploadPath,
+      taken_at: takenAt,
+      gps_lat: gps?.lat ?? null,
+      gps_lng: gps?.lng ?? null,
+      gps_accuracy_m: gps?.accuracy_m ?? null,
+      uploaded_by: state.user?.id || null,
+    }, { onConflict: "splice_location_id,slot_key" })
+    .select("photo_path, taken_at, gps_lat, gps_lng, gps_accuracy_m")
+    .maybeSingle();
+
+  if (error){
+    delete loc.photosBySlot[slotKey];
+    renderLocations();
+    renderProofChecklist();
+    toast("Upload failed", error.message);
+    return;
+  }
+
+  loc.photosBySlot[slotKey] = {
+    path: data?.photo_path || uploadPath,
+    taken_at: data?.taken_at || takenAt,
+    gps: data?.gps_lat != null && data?.gps_lng != null
+      ? { lat: data.gps_lat, lng: data.gps_lng, accuracy_m: data.gps_accuracy_m }
+      : null,
+    previewUrl,
+  };
+  await loadSplicePhotos(node.id, [loc]);
+  renderLocations();
+  renderProofChecklist();
 }
 
 function renderInventory(){
@@ -490,38 +1184,75 @@ function renderInventory(){
 }
 
 function setProofStatus(){
-  const el = $("proofStatus");
-  if (!el) return;
+  const el = $("photoStatus");
+  const mini = $("photoStatusMini");
   if (!state.lastProof){
-    el.textContent = "No proof photo captured";
+    if (el) el.textContent = "No photo captured";
+    if (mini) mini.textContent = "No photo captured yet.";
+    renderProofPreview();
     return;
   }
   const gps = state.lastProof.gps
     ? `${state.lastProof.gps.lat.toFixed(6)}, ${state.lastProof.gps.lng.toFixed(6)}`
     : "GPS missing";
-  el.textContent = `Proof ready: ${state.lastProof.captured_at} (${gps})`;
+  if (el) el.textContent = `Photo ready: ${state.lastProof.captured_at} (${gps})`;
+  if (mini) mini.textContent = `Photo ready: ${state.lastProof.captured_at}`;
+  renderProofPreview();
+}
+
+function renderProofPreview(){
+  const wrap = $("photoPreview");
+  if (!wrap) return;
+  const items = [
+    state.lastProof ? { label: "Usage photo", data: state.lastProof } : null,
+  ].filter(Boolean);
+
+  if (!items.length){
+    wrap.innerHTML = '<div class="muted small">No photo captured yet.</div>';
+    return;
+  }
+
+  wrap.innerHTML = items.map((item) => {
+    const photoUrl = item.data.previewUrl || "";
+    const gps = item.data.gps
+      ? `${item.data.gps.lat.toFixed(6)}, ${item.data.gps.lng.toFixed(6)}`
+      : "GPS missing";
+    return `
+      <div class="row" style="gap:16px; align-items:flex-start;">
+        ${photoUrl ? `<img src="${photoUrl}" alt="usage photo" />` : ""}
+        <div>
+          <div style="font-weight:900">${item.label}</div>
+          <div class="muted small">${item.data.captured_at}</div>
+          <div class="muted small">${gps}</div>
+        </div>
+      </div>
+    `;
+  }).join("<div class=\"hr\"></div>");
 }
 
 function clearProof(){
   state.lastProof = null;
-  const input = $("proofPhotoFile");
-  if (input) input.value = "";
+  state.cameraInvalidated = false;
   setProofStatus();
+  renderProofPreview();
 }
 
-async function handleProofFileSelected(file){
-  if (!file){
-    toast("Choose a photo", "Pick a proof photo first.");
-    return;
-  }
-  if (!state.lastGPS){
-    toast("GPS required", "Capture GPS before attaching a proof photo.");
-    return;
-  }
+function clearUsageProof(){
+  state.lastProof = null;
+  state.cameraInvalidated = false;
+  setProofStatus();
+  renderProofPreview();
+}
+
+async function captureUsageProof(){
+  const shot = await captureFrame();
+  if (!shot) return;
   state.lastProof = {
-    file,
-    captured_at: nowISO(),
-    gps: { ...state.lastGPS },
+    file: makeFileFromBlob(shot.blob),
+    captured_at: shot.captured_at,
+    gps: shot.gps,
+    previewUrl: shot.previewUrl,
+    camera: true,
   };
   setProofStatus();
 }
@@ -529,7 +1260,7 @@ async function handleProofFileSelected(file){
 async function uploadProofPhoto(file, nodeId, prefix){
   if (!state.client) return null;
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const folder = `${prefix || "proof"}/node-${nodeId}`;
+  const folder = `${prefix || "photos"}/node-${nodeId}`;
   const path = `${folder}/${Date.now()}-${safeName}`;
   const { data, error } = await state.client
     .storage
@@ -542,6 +1273,19 @@ async function uploadProofPhoto(file, nodeId, prefix){
   return data?.path || path;
 }
 
+async function recordProofUpload(payload){
+  if (isDemo) return;
+  if (!state.client) return;
+  const { error } = await state.client.from("proof_uploads").insert({
+    device_info: navigator.userAgent,
+    camera: true,
+    ...payload,
+  });
+  if (error){
+    toast("Photo log failed", error.message);
+  }
+}
+
 async function submitUsage(itemId, qty){
   const node = state.activeNode;
   if (!node) return;
@@ -549,8 +1293,17 @@ async function submitUsage(itemId, qty){
     toast("Qty required", "Enter a valid quantity to submit.");
     return;
   }
-  if (!state.lastProof?.file || !state.lastProof?.gps || !state.lastProof?.captured_at){
-    toast("Proof required", "Capture a live photo with GPS before submitting usage.");
+  if (!state.lastProof?.file || !state.lastProof?.gps || !state.lastProof?.captured_at || state.cameraInvalidated){
+    toast("Photos required", "Capture a live photo with GPS before submitting usage.");
+    return;
+  }
+  if (!state.lastProof.camera){
+    toast("Camera required", "Camera capture required. Gallery uploads are not allowed.");
+    return;
+  }
+  const jobNumber = state.activeProject?.job_number;
+  if (!jobNumber){
+    toast("Job required", "Job number required to submit usage photos.");
     return;
   }
 
@@ -559,6 +1312,7 @@ async function submitUsage(itemId, qty){
     toast("Item missing", "This item is no longer available.");
     return;
   }
+  const unitTypeId = resolveUnitTypeIdForItem(plannedItem);
   const remaining = getRemainingForItem(plannedItem);
   const status = qty > remaining ? "needs_approval" : "approved";
 
@@ -567,60 +1321,96 @@ async function submitUsage(itemId, qty){
       id: `use-${Date.now()}`,
       node_id: node.id,
       item_id: itemId,
+      unit_type_id: unitTypeId,
       qty,
       status,
       captured_at: state.lastProof.captured_at,
+      captured_at_client: state.lastProof.captured_at,
       gps_lat: state.lastProof.gps.lat,
       gps_lng: state.lastProof.gps.lng,
       gps_accuracy_m: state.lastProof.gps.accuracy_m,
       photo_path: "demo-only",
+      proof_required: true,
+      camera: true,
     });
     if (status === "needs_approval"){
       toast("Needs approval", "Overage submitted and pending approval.");
     } else {
       toast("Usage submitted", "Approved usage recorded.");
     }
-    clearProof();
+    if (unitTypeId){
+      maybeCreateDemoAlert(node.id, unitTypeId);
+      state.alerts = state.demo.alerts || [];
+      updateAlertsBadge();
+      renderAlerts();
+    }
+    clearUsageProof();
+    state.cameraInvalidated = false;
     renderInventory();
+    renderAllowedQuantities();
+    renderProofChecklist();
     return;
   }
 
   const uploadPath = await uploadProofPhoto(state.lastProof.file, node.id, "usage");
   if (!uploadPath) return;
 
-  const { error } = await state.client
+  const { data, error } = await state.client
     .from("usage_events")
     .insert({
       node_id: node.id,
       item_id: itemId,
+      unit_type_id: unitTypeId,
       qty,
       status,
       photo_path: uploadPath,
-      captured_at: state.lastProof.captured_at,
+      captured_at_client: state.lastProof.captured_at,
       gps_lat: state.lastProof.gps.lat,
       gps_lng: state.lastProof.gps.lng,
       gps_accuracy_m: state.lastProof.gps.accuracy_m,
-    });
+      proof_required: true,
+      camera: true,
+    })
+    .select("id");
 
   if (error){
     toast("Usage error", error.message);
     return;
+  }
+  const usageId = data?.[0]?.id;
+  if (usageId){
+    await recordProofUpload({
+      node_id: node.id,
+      usage_event_id: usageId,
+      photo_url: uploadPath,
+      lat: state.lastProof.gps.lat,
+      lng: state.lastProof.gps.lng,
+      captured_at_client: state.lastProof.captured_at,
+      job_number: jobNumber,
+      camera: true,
+      captured_by: state.user?.id || null,
+    });
   }
   if (status === "needs_approval"){
     toast("Needs approval", "Overage submitted and pending approval.");
   } else {
     toast("Usage submitted", "Approved usage recorded.");
   }
-  clearProof();
+  clearUsageProof();
+  state.cameraInvalidated = false;
   await loadUsageEvents(node.id);
+  await loadAlerts(node.id);
   renderInventory();
+  renderAllowedQuantities();
+  renderAlerts();
+  renderProofChecklist();
 }
 
 async function loadUsageEvents(nodeId){
   if (isDemo) return;
   const { data, error } = await state.client
     .from("usage_events")
-    .select("id,node_id,item_id,qty,status")
+    .select("id,node_id,item_id,unit_type_id,qty,status,photo_path,gps_lat,gps_lng,captured_at_server,captured_at_client,proof_required,camera")
     .eq("node_id", nodeId);
   if (error){
     toast("Usage load error", error.message);
@@ -668,7 +1458,11 @@ function subscribeUsageEvents(nodeId){
       { event: "*", schema: "public", table: "usage_events", filter: `node_id=eq.${nodeId}` },
       async () => {
         await loadUsageEvents(nodeId);
+        await loadAlerts(nodeId);
         renderInventory();
+        renderAllowedQuantities();
+        renderProofChecklist();
+        renderAlerts();
       }
     )
     .subscribe();
@@ -699,11 +1493,12 @@ function renderInvoicePanel(){
   }
 
   const completion = computeNodeCompletion(node);
-  const eligible = completion.pct === 100 && node.ready_for_billing;
+  const photos = computeProofStatus(node);
+  const eligible = completion.pct === 100 && node.ready_for_billing && photos.photosOk;
 
   html += `<div class="note">
     <div style="font-weight:900;">Billing gate</div>
-    <div class="muted small">Node can be invoiced only when: splice locations complete + inventory checklist complete + node marked READY.</div>
+    <div class="muted small">Node can be invoiced only when: splice locations complete + inventory checklist complete + photos captured + node marked READY.</div>
     <div style="margin-top:8px;">Status: ${eligible ? '<span class="pill-ok">ELIGIBLE</span>' : '<span class="pill-warn">NOT READY</span>'}</div>
   </div>`;
 
@@ -775,6 +1570,12 @@ function getUsageItemId(item){
   return item.item_id || item.id;
 }
 
+function resolveUnitTypeIdForItem(item){
+  const code = String(item.unit_type_code || item.item_code || "").toUpperCase();
+  const match = state.unitTypes.find(u => String(u.code || "").toUpperCase() === code);
+  return match?.id || null;
+}
+
 function getApprovedUsageQty(itemId){
   const events = isDemo ? state.demo.usageEvents : state.usageEvents;
   const nodeId = state.activeNode?.id;
@@ -783,10 +1584,283 @@ function getApprovedUsageQty(itemId){
     .reduce((sum, e) => sum + e.qty, 0);
 }
 
+function getApprovedUsageByUnitType(unitTypeId){
+  const events = isDemo ? state.demo.usageEvents : state.usageEvents;
+  const nodeId = state.activeNode?.id;
+  return events
+    .filter(e => e.unit_type_id === unitTypeId && e.status === "approved" && (!nodeId || e.node_id === nodeId))
+    .reduce((sum, e) => sum + e.qty, 0);
+}
+
+function getMissingUsageProof(nodeId){
+  const events = isDemo ? state.demo.usageEvents : state.usageEvents;
+  return events.filter((e) => {
+    if (nodeId && e.node_id !== nodeId) return false;
+    if (e.proof_required === false) return false;
+    if (e.camera !== true) return true;
+    const serverTime = e.captured_at_server || e.captured_at;
+    return !e.photo_path || e.gps_lat == null || e.gps_lng == null || !serverTime;
+  });
+}
+
+function getUnitTypeMeta(unitTypeId){
+  const unit = state.unitTypes.find(u => u.id === unitTypeId);
+  if (!unit) return { code: "-", description: "" };
+  return { code: unit.code, description: unit.description || "" };
+}
+
 function getRemainingForItem(item){
   const planned = Number.isFinite(item.planned_qty) ? item.planned_qty : (item.qty_used || 0);
   const approved = getApprovedUsageQty(getUsageItemId(item));
   return planned - approved;
+}
+
+function updateAlertsBadge(){
+  const role = getRole();
+  const canSeeAlerts = role === "PRIME" || role === "OWNER";
+  const openAlerts = canSeeAlerts ? (state.alerts || []).filter(a => a.status === "open") : [];
+  const count = openAlerts.length;
+  const badge = $("alertsBadge");
+  if (badge){
+    badge.textContent = canSeeAlerts
+      ? (count ? `${count} alert${count > 1 ? "s" : ""}` : "No alerts")
+      : "Alerts for PRIME only";
+    badge.classList.toggle("warn", count > 0 && canSeeAlerts);
+  }
+  const navBadge = $("alertsNavBadge");
+  if (navBadge){
+    navBadge.textContent = count ? String(count) : "";
+    navBadge.style.display = count && canSeeAlerts ? "inline-flex" : "none";
+  }
+}
+
+async function loadSplicePhotos(nodeId, locs){
+  if (isDemo){
+    locs.forEach((loc) => {
+      loc.photosBySlot = loc.photosBySlot || {};
+    });
+    return;
+  }
+  if (!state.client || !locs.length) return;
+  const locIds = locs.map((loc) => loc.id);
+  const { data, error } = await state.client
+    .from("splice_location_photos")
+    .select("splice_location_id, slot_key, photo_path, taken_at, gps_lat, gps_lng, gps_accuracy_m")
+    .in("splice_location_id", locIds);
+  if (error){
+    toast("Photos load error", error.message);
+    return;
+  }
+  const byLoc = new Map();
+  (data || []).forEach((row) => {
+    if (!row.slot_key) return;
+    const key = row.splice_location_id;
+    if (!byLoc.has(key)) byLoc.set(key, {});
+    const current = byLoc.get(key);
+    current[row.slot_key] = {
+      path: row.photo_path,
+      taken_at: row.taken_at,
+      gps: row.gps_lat != null && row.gps_lng != null
+        ? { lat: row.gps_lat, lng: row.gps_lng, accuracy_m: row.gps_accuracy_m }
+        : null,
+    };
+  });
+  locs.forEach((loc) => {
+    const photos = byLoc.get(loc.id) || {};
+    const existing = loc.photosBySlot || {};
+    const merged = {};
+    Object.keys(photos).forEach((slotKey) => {
+      merged[slotKey] = {
+        ...photos[slotKey],
+        previewUrl: existing[slotKey]?.previewUrl || null,
+      };
+    });
+    loc.photosBySlot = merged;
+  });
+}
+
+function renderAlerts(){
+  const role = getRole();
+  const canSeeAlerts = role === "PRIME" || role === "OWNER";
+  const list = canSeeAlerts ? (state.alerts || []) : [];
+  const targets = [$("alertsFeed"), $("alertsFeedFull")].filter(Boolean);
+  if (!targets.length) return;
+  const html = list.length
+    ? list.map((alert) => {
+        const unit = getUnitTypeMeta(alert.unit_type_id);
+        const unitCode = alert.unit_types?.code || unit.code;
+        const unitDesc = unit.description;
+        const created = alert.created_at ? new Date(alert.created_at).toLocaleString() : "";
+        const nodeLabel = state.activeNode?.node_number || (alert.node_id ? String(alert.node_id).slice(0, 8) : "-");
+        return `
+          <div class="alert-card">
+            <div class="row" style="justify-content:space-between;">
+              <div>
+                <div style="font-weight:900">Node ${escapeHtml(nodeLabel)}</div>
+                <div class="muted small">${escapeHtml(unitCode)} ${escapeHtml(unitDesc)}</div>
+              </div>
+              <span class="chip"><span class="dot warn"></span><span>${escapeHtml(alert.severity || "warning")}</span></span>
+            </div>
+            <div class="muted small" style="margin-top:6px;">Allowed: ${alert.allowed_qty ?? "-"} | Used: ${alert.used_qty ?? "-"} | Remaining: ${alert.remaining_qty ?? "-"}</div>
+            <div style="margin-top:6px;">${escapeHtml(alert.message || "")}</div>
+            <div class="muted small" style="margin-top:6px;">${created}</div>
+          </div>
+        `;
+      }).join("")
+    : `<div class="muted small">${canSeeAlerts ? "No alerts right now." : "Alerts are available to PRIME / OWNER."}</div>`;
+  targets.forEach((el) => {
+    el.innerHTML = html;
+  });
+}
+
+function renderAllowedQuantities(){
+  const wrap = $("allowedQuantities");
+  if (!wrap) return;
+  const rows = state.allowedQuantities || [];
+  if (!state.activeNode || !rows.length){
+    wrap.innerHTML = '<div class="muted small">Open a node to see allowed quantities.</div>';
+    return;
+  }
+  wrap.innerHTML = `
+    <table class="table">
+      <thead><tr><th>Unit type</th><th>Allowed</th><th>Used</th><th>Remaining</th><th>Threshold</th></tr></thead>
+      <tbody>
+        ${rows.map((row) => {
+          const used = getApprovedUsageByUnitType(row.unit_type_id);
+          const remaining = row.allowed_qty - used;
+          const pct = row.alert_threshold_pct != null ? `${Math.round(row.alert_threshold_pct * 100)}%` : "-";
+          const abs = row.alert_threshold_abs != null ? row.alert_threshold_abs : "-";
+          return `
+            <tr>
+              <td>${escapeHtml(row.unit_code || "-")}</td>
+              <td>${row.allowed_qty}</td>
+              <td>${used}</td>
+              <td>${remaining}</td>
+              <td>${pct} / ${abs}</td>
+            </tr>
+          `;
+        }).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function maybeCreateDemoAlert(nodeId, unitTypeId){
+  if (!isDemo) return;
+  const row = (state.demo.allowedQuantities || []).find(a => a.node_id === nodeId && a.unit_type_id === unitTypeId);
+  if (!row) return;
+  const used = getApprovedUsageByUnitType(unitTypeId);
+  const remaining = row.allowed_qty - used;
+  const thresholdPct = row.alert_threshold_pct ?? 0.15;
+  const thresholdAbs = row.alert_threshold_abs ?? null;
+  const hitPct = row.allowed_qty > 0 && (remaining / row.allowed_qty) <= thresholdPct;
+  const hitAbs = thresholdAbs != null && remaining <= thresholdAbs;
+  if (!(hitPct || hitAbs)) return;
+  const exists = (state.demo.alerts || []).some(a => a.node_id === nodeId && a.unit_type_id === unitTypeId && a.status === "open");
+  if (exists) return;
+  state.demo.alerts = state.demo.alerts || [];
+  state.demo.alerts.unshift({
+    id: `alert-${Date.now()}`,
+    node_id: nodeId,
+    unit_type_id: unitTypeId,
+    allowed_qty: row.allowed_qty,
+    used_qty: used,
+    remaining_qty: remaining,
+    message: "Remaining units below threshold. Request approval for additional units.",
+    severity: "warning",
+    status: "open",
+    created_at: nowISO(),
+  });
+}
+
+function filterCatalog(term){
+  const needle = (term || "").trim().toLowerCase();
+  if (!needle) return state.materialCatalog || [];
+  return (state.materialCatalog || []).filter((item) => {
+    return [
+      item.millennium_part,
+      item.mfg_sku,
+      item.description,
+    ].some((field) => String(field || "").toLowerCase().includes(needle));
+  });
+}
+
+function renderCatalogResults(targetId, term){
+  const target = $(targetId);
+  if (!target) return;
+  const results = filterCatalog(term);
+  if (!results.length){
+    target.innerHTML = '<div class="muted small">No matching catalog items.</div>';
+    return;
+  }
+  target.innerHTML = results.map((item) => `
+    <div class="catalog-card">
+      <img class="catalog-photo" src="${item.photo_url || "./assets/millennium_example.png"}" alt="catalog photo"/>
+      <div>
+        <div class="catalog-title">${escapeHtml(item.description || "Catalog item")}</div>
+        <div class="muted small">Millennium: <b>${escapeHtml(item.millennium_part || "-")}</b></div>
+        <div class="muted small">MFG SKU: <b>${escapeHtml(item.mfg_sku || "-")}</b></div>
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderProofChecklist(){
+  const wrap = $("photoChecklist");
+  const summary = $("photoChecklistSummary");
+  const node = state.activeNode;
+  if (!wrap || !summary){
+    return;
+  }
+  if (!node){
+    wrap.innerHTML = '<div class="muted small">Open a node to see photo requirements.</div>';
+    summary.innerHTML = '<div class="muted small">No node selected.</div>';
+    return;
+  }
+
+  const locs = node.splice_locations || [];
+  const missingLocs = locs.filter(l => !hasAllRequiredSlotPhotos(l));
+  const slotCounts = locs.map((loc) => {
+    const requiredSlots = getRequiredSlotsForLocation(loc);
+    const photos = loc.photosBySlot || {};
+    const missingSlots = requiredSlots.filter((slot) => !photos[slot]).length;
+    return {
+      required: requiredSlots.length,
+      missing: missingSlots,
+      uploaded: requiredSlots.length - missingSlots,
+    };
+  });
+  const missingSlotCount = slotCounts.reduce((sum, row) => sum + row.missing, 0);
+  const missingUsage = getMissingUsageProof(node.id);
+
+  summary.innerHTML = `
+    <div style="font-weight:900;">Photos required</div>
+    <div class="muted small">${missingLocs.length} splice locations missing photos (${missingSlotCount} slots), ${missingUsage.length} usage entries missing photos.</div>
+  `;
+
+  if (!locs.length){
+    wrap.innerHTML = '<div class="muted small">No splice locations yet.</div>';
+    return;
+  }
+
+  wrap.innerHTML = `
+    <table class="table">
+      <thead><tr><th>Location</th><th>Photos</th><th>Status</th></tr></thead>
+      <tbody>
+        ${locs.map((loc) => {
+          const counts = countRequiredSlotUploads(loc);
+          const ok = counts.uploaded >= counts.required;
+          return `
+            <tr>
+              <td>${escapeHtml(loc.name)}</td>
+              <td>${counts.uploaded}/${counts.required}</td>
+              <td>${ok ? '<span class="pill-ok">OK</span>' : '<span class="pill-warn">Missing</span>'}</td>
+            </tr>
+          `;
+        }).join("")}
+      </tbody>
+    </table>
+  `;
 }
 
 async function captureGPS(){
@@ -814,63 +1888,83 @@ async function captureGPS(){
   });
 }
 
-async function attachPhotoToLastIncomplete(file){
-  const node = state.activeNode;
-  if (!node) return;
-
-  const loc = (node.splice_locations || []).find(l => !l.photo) || node.splice_locations?.[0];
-  if (!loc){
-    toast("No location", "Add a splice location first.");
-    return;
+async function startCamera(){
+  const video = $("cameraStream");
+  const videoNodes = $("cameraStreamNodes");
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    toast("Camera required", "Camera access required. Gallery uploads are not allowed.");
+    return false;
   }
-
-  if (isDemo){
-    const url = URL.createObjectURL(file);
-    loc.photo = { kind:"local", url, name:file.name, size:file.size };
-    loc.taken_at = nowISO();
-    toast("Photo attached", `Attached to: ${loc.name}`);
-
-    // If GPS already captured, apply it too (common workflow: capture once at the case)
-    if (state.lastGPS && !loc.gps){
-      loc.gps = { lat: state.lastGPS.lat, lng: state.lastGPS.lng, accuracy_m: state.lastGPS.accuracy_m };
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    state.cameraStream = stream;
+    state.cameraReady = true;
+    state.cameraInvalidated = false;
+    state.cameraStartedAt = Date.now();
+    if (video){
+      video.srcObject = stream;
     }
+    if (videoNodes){
+      videoNodes.srcObject = stream;
+    }
+    return true;
+  } catch (err){
+    toast("Camera required", "Camera access required. Gallery uploads are not allowed.");
+    state.cameraReady = false;
+    return false;
+  }
+}
 
-    renderLocations();
-    updateKPI();
-    return;
+function ensureCameraReady(){
+  if (!state.cameraReady){
+    toast("Camera required", "Start the camera before capturing photos.");
+    return false;
+  }
+  if (state.cameraInvalidated){
+    toast("Capture blocked", "Page focus changed. Restart the camera to capture photos.");
+    return false;
+  }
+  return true;
+}
+
+async function captureFrame(){
+  const video = $("cameraStream");
+  if (!video){
+    toast("Camera required", "Camera access required. Gallery uploads are not allowed.");
+    return null;
+  }
+  if (!ensureCameraReady()){
+    return null;
+  }
+  if (document.hidden){
+    toast("Capture blocked", "Camera capture must be in the foreground.");
+    return null;
+  }
+  if (state.lastVisibilityChangeAt && state.cameraStartedAt && state.lastVisibilityChangeAt > state.cameraStartedAt){
+    toast("Capture blocked", "Page focus changed. Restart the camera to capture photos.");
+    return null;
+  }
+  const gps = await captureGPS();
+  if (!gps){
+    toast("GPS required", "GPS is required for payment.");
+    return null;
   }
 
-  const takenAt = nowISO();
-  const uploadPath = await uploadProofPhoto(file, node.id, "splice");
-  if (!uploadPath) return;
-
-  const gps = state.lastGPS;
-  const { data, error } = await state.client
-    .from("splice_locations")
-    .update({
-      photo_path: uploadPath,
-      taken_at: takenAt,
-      gps_lat: gps?.lat ?? null,
-      gps_lng: gps?.lng ?? null,
-      gps_accuracy_m: gps?.accuracy_m ?? null,
-    })
-    .eq("id", loc.id)
-    .select("id, photo_path, taken_at, gps_lat, gps_lng, gps_accuracy_m")
-    .maybeSingle();
-
-  if (error){
-    toast("Photo error", error.message);
-    return;
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth || 1280;
+  canvas.height = video.videoHeight || 720;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+  if (!blob){
+    toast("Capture failed", "Unable to capture camera frame.");
+    return null;
   }
+  return { blob, gps, captured_at: nowISO(), previewUrl: URL.createObjectURL(blob) };
+}
 
-  loc.photo = { kind:"storage", path: data.photo_path };
-  loc.taken_at = data.taken_at;
-  loc.gps = (data.gps_lat != null && data.gps_lng != null)
-    ? { lat: data.gps_lat, lng: data.gps_lng, accuracy_m: data.gps_accuracy_m }
-    : null;
-  toast("Photo attached", `Attached to: ${loc.name}`);
-  renderLocations();
-  updateKPI();
+function makeFileFromBlob(blob){
+  return new File([blob], `capture-${Date.now()}.jpg`, { type: "image/jpeg" });
 }
 
 async function addSpliceLocation(){
@@ -886,9 +1980,12 @@ async function addSpliceLocation(){
       photo: null,
       taken_at: null,
       completed: false,
+      terminal_ports: DEFAULT_TERMINAL_PORTS,
+      photosBySlot: {},
     });
     renderLocations();
     updateKPI();
+    renderProofChecklist();
     return;
   }
 
@@ -897,8 +1994,9 @@ async function addSpliceLocation(){
     .insert({
       node_id: node.id,
       location_label: `Splice location ${n}`,
+      terminal_ports: DEFAULT_TERMINAL_PORTS,
     })
-    .select("id, location_label, gps_lat, gps_lng, gps_accuracy_m, photo_path, taken_at, completed")
+    .select("id, location_label, gps_lat, gps_lng, gps_accuracy_m, photo_path, taken_at, completed, terminal_ports")
     .maybeSingle();
 
   if (error){
@@ -915,9 +2013,12 @@ async function addSpliceLocation(){
     photo: data.photo_path ? { kind:"storage", path:data.photo_path } : null,
     taken_at: data.taken_at,
     completed: data.completed,
+    terminal_ports: normalizeTerminalPorts(data.terminal_ports ?? DEFAULT_TERMINAL_PORTS),
+    photosBySlot: {},
   });
   renderLocations();
   updateKPI();
+  renderProofChecklist();
 }
 
 async function openNode(nodeNumber){
@@ -929,6 +2030,7 @@ async function openNode(nodeNumber){
     toast("Node number needed", "Enter a node number (example: NODE-1001).");
     return;
   }
+  clearProof();
 
   if (isDemo){
     if (!state.demo.nodes[n]){
@@ -936,7 +2038,25 @@ async function openNode(nodeNumber){
       return;
     }
 
+    const nodeMeta = (state.demo.nodesList || []).find(x => x.node_number === n);
+    const activeMeta = (state.demo.nodesList || []).find(x => x.status === "ACTIVE");
+    if (nodeMeta && activeMeta && activeMeta.node_number !== n && activeMeta.status !== "COMPLETE"){
+      toast("Active node in progress", `Finish ${activeMeta.node_number} before starting another node.`);
+      return;
+    }
+    if (nodeMeta && nodeMeta.status !== "COMPLETE"){
+      nodeMeta.status = "ACTIVE";
+    }
+
     state.activeNode = state.demo.nodes[n];
+    state.unitTypes = state.demo.unitTypes || [];
+    await loadAllowedQuantities(state.activeNode.id);
+    await loadAlerts(state.activeNode.id);
+    state.activeNode.splice_locations = (state.activeNode.splice_locations || []).map((loc) => ({
+      ...loc,
+      terminal_ports: normalizeTerminalPorts(loc.terminal_ports ?? DEFAULT_TERMINAL_PORTS),
+      photosBySlot: loc.photosBySlot || {},
+    }));
 
     // In real app, pricing is server-side protected.
     // Here we just display message.
@@ -944,7 +2064,11 @@ async function openNode(nodeNumber){
     renderLocations();
     renderInventory();
     renderInvoicePanel();
+    renderAllowedQuantities();
+    renderAlerts();
+    renderProofChecklist();
     updateKPI();
+    renderNodeCards();
 
     // PRIME alert when near units
     if (role === "PRIME" && state.activeNode.units_allowed > 0){
@@ -958,7 +2082,7 @@ async function openNode(nodeNumber){
 
   const nodeQuery = state.client
     .from("nodes")
-    .select("id, node_number, allowed_units, used_units, ready_for_billing, project_id")
+    .select("id, node_number, description, status, allowed_units, used_units, ready_for_billing, project_id")
     .eq("node_number", n);
 
   if (state.activeProject?.id){
@@ -975,9 +2099,29 @@ async function openNode(nodeNumber){
     return;
   }
 
+  const activeNodeMeta = state.projectNodes.find(n => n.status === "ACTIVE");
+  if (activeNodeMeta && activeNodeMeta.node_number !== nodeRow.node_number){
+    toast("Active node in progress", `Finish ${activeNodeMeta.node_number} before starting another node.`);
+    return;
+  }
+
+  if (nodeRow.status !== "COMPLETE" && nodeRow.status !== "ACTIVE"){
+    const { error: statusErr } = await state.client
+      .from("nodes")
+      .update({ status: "ACTIVE", started_at: new Date().toISOString() })
+      .eq("id", nodeRow.id);
+    if (statusErr){
+      toast("Node start failed", statusErr.message);
+      return;
+    }
+    nodeRow.status = "ACTIVE";
+  }
+
   const node = {
     id: nodeRow.id,
     node_number: nodeRow.node_number,
+    description: nodeRow.description,
+    status: nodeRow.status,
     units_allowed: nodeRow.allowed_units || 0,
     units_used: nodeRow.used_units || 0,
     ready_for_billing: nodeRow.ready_for_billing,
@@ -987,7 +2131,7 @@ async function openNode(nodeNumber){
   const [spliceRes, invRes, subInvRes, primeInvRes] = await Promise.all([
     state.client
       .from("splice_locations")
-      .select("id, location_label, gps_lat, gps_lng, gps_accuracy_m, photo_path, taken_at, completed")
+      .select("id, location_label, gps_lat, gps_lng, gps_accuracy_m, photo_path, taken_at, completed, terminal_ports")
       .eq("node_id", node.id),
     state.client
       .from("node_inventory")
@@ -1025,6 +2169,8 @@ async function openNode(nodeNumber){
     photo: r.photo_path ? { kind:"storage", path:r.photo_path } : null,
     taken_at: r.taken_at,
     completed: r.completed,
+    terminal_ports: normalizeTerminalPorts(r.terminal_ports ?? DEFAULT_TERMINAL_PORTS),
+    photosBySlot: {},
   }));
 
   node.inventory_checks = (invRes.data || []).map((r) => ({
@@ -1045,13 +2191,20 @@ async function openNode(nodeNumber){
 
   state.activeNode = node;
   await loadUsageEvents(node.id);
+  await loadSplicePhotos(node.id, node.splice_locations);
+  await loadAllowedQuantities(node.id);
+  await loadAlerts(node.id);
   subscribeUsageEvents(node.id);
 
   setRoleUI();
   renderLocations();
   renderInventory();
   renderInvoicePanel();
+  renderAllowedQuantities();
+  renderAlerts();
+  renderProofChecklist();
   updateKPI();
+  await loadProjectNodes(node.project_id);
 }
 
 async function createNode(nodeNumber){
@@ -1066,9 +2219,12 @@ async function createNode(nodeNumber){
       toast("Already exists", "That node already exists.");
       return;
     }
-    state.demo.nodes[n] = {
+    const newNode = {
       id: `demo-${Date.now()}`,
       node_number: n,
+      description: "New node",
+      status: "NOT_STARTED",
+      project_id: state.activeProject?.id || state.demo.project?.id,
       units_allowed: 120,
       units_used: 0,
       splice_locations: [],
@@ -1077,6 +2233,16 @@ async function createNode(nodeNumber){
       ],
       ready_for_billing: false,
     };
+    state.demo.nodes[n] = newNode;
+    state.demo.nodesList = state.demo.nodesList || [];
+    state.demo.nodesList.push({
+      id: newNode.id,
+      node_number: newNode.node_number,
+      description: newNode.description,
+      status: newNode.status,
+      project_id: newNode.project_id,
+    });
+    renderNodeCards();
     toast("Node created", `Created node ${n}. Now click Open node.`);
     return;
   }
@@ -1088,12 +2254,14 @@ async function createNode(nodeNumber){
       allowed_units: 0,
       used_units: 0,
       project_id: state.activeProject?.id || null,
+      status: "NOT_STARTED",
     });
 
   if (error){
     toast("Create failed", error.message);
     return;
   }
+  await loadProjectNodes(state.activeProject?.id || null);
   toast("Node created", `Created node ${n}. Now click Open node.`);
 }
 
@@ -1104,6 +2272,11 @@ async function markNodeReady(){
   const c = computeNodeCompletion(node);
   if (!(c.locOk && c.invOk)){
     toast("Not ready", "Finish all splice locations + inventory checklist first.");
+    return;
+  }
+  const photos = computeProofStatus(node);
+  if (!photos.photosOk){
+    toast("Photos required", "Take photos (GPS + photo + timestamp) before marking the node ready.");
     return;
   }
   if (isDemo){
@@ -1141,6 +2314,11 @@ async function createInvoice(){
   const completion = computeNodeCompletion(node);
   if (!(completion.pct === 100 && node.ready_for_billing)){
     toast("Blocked", "Invoices are blocked until documentation is complete and node is marked READY.");
+    return;
+  }
+  const photos = computeProofStatus(node);
+  if (!photos.photosOk){
+    toast("Blocked", "Photos are required before invoice submission.");
     return;
   }
 
@@ -1203,13 +2381,23 @@ async function initAuth(){
     const pick = prompt("Demo mode: choose a role (TDS, PRIME, SUB, SPLICER, OWNER)", state.demo.role) || state.demo.role;
     const role = state.demo.roles.includes(pick.toUpperCase()) ? pick.toUpperCase() : state.demo.role;
     state.demo.role = role;
+    await loadProjects();
+    await loadProjectNodes(state.activeProject?.id || null);
+    await loadUnitTypes();
+    await loadMaterialCatalog();
     setWhoami();
     setRoleUI();
     renderLocations();
     renderInventory();
     renderInvoicePanel();
+    renderAllowedQuantities();
+    renderAlerts();
+    renderProofChecklist();
     updateKPI();
     setProofStatus();
+    renderCatalogResults("catalogResults", "");
+    renderCatalogResults("catalogResultsQuick", "");
+    setActiveView("viewDashboard");
     return;
   }
 
@@ -1226,6 +2414,14 @@ async function initAuth(){
     if (state.user) {
       showAuth(false);
       await loadProjects();
+      await loadProjectNodes(state.activeProject?.id || null);
+      await loadUnitTypes();
+      await loadMaterialCatalog();
+      await loadAlerts();
+      renderAlerts();
+      renderCatalogResults("catalogResults", "");
+      renderCatalogResults("catalogResultsQuick", "");
+      setActiveView("viewDashboard");
     } else {
       showAuth(true);
       state.activeNode = null;
@@ -1241,6 +2437,14 @@ async function initAuth(){
   await loadProfile();
   if (state.user){
     await loadProjects();
+    await loadProjectNodes(state.activeProject?.id || null);
+    await loadUnitTypes();
+    await loadMaterialCatalog();
+    await loadAlerts();
+    renderAlerts();
+    renderCatalogResults("catalogResults", "");
+    renderCatalogResults("catalogResultsQuick", "");
+    setActiveView("viewDashboard");
   }
   setWhoami();
   showAuth(!state.user);
@@ -1273,6 +2477,26 @@ async function loadProfile(){
 }
 
 function wireUI(){
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.addEventListener("click", () => setActiveView(btn.dataset.view));
+  });
+
+  const nodeCards = $("nodeCards");
+  if (nodeCards){
+    nodeCards.addEventListener("click", (e) => {
+      const btn = e.target.closest("button");
+      if (!btn) return;
+      const action = btn.dataset.action;
+      const id = btn.dataset.id;
+      if (!id) return;
+      if (action === "openNode"){
+        startNode(id);
+      } else if (action === "completeNode"){
+        completeNode(id);
+      }
+    });
+  }
+
   $("btnDemo").addEventListener("click", () => {
     showAuth(false);
     initAuth();
@@ -1284,7 +2508,7 @@ function wireUI(){
       state.activeNode = null;
       showAuth(true);
       $("btnSignOut").style.display = "none";
-      $("whoami").textContent = "Not signed in";
+      $("whoami").textContent = "Signed out";
       clearProof();
       return;
     }
@@ -1326,6 +2550,26 @@ function wireUI(){
     else toast("Signed up", "Now assign a role in profiles (OWNER/PRIME/SUB/SPLICER/TDS).");
   });
 
+  const catalogSearch = $("catalogSearch");
+  if (catalogSearch){
+    catalogSearch.addEventListener("input", (e) => {
+      renderCatalogResults("catalogResults", e.target.value);
+    });
+  }
+  const catalogSearchQuick = $("catalogSearchQuick");
+  if (catalogSearchQuick){
+    catalogSearchQuick.addEventListener("input", (e) => {
+      renderCatalogResults("catalogResultsQuick", e.target.value);
+    });
+  }
+  const catalogClear = $("btnCatalogClear");
+  if (catalogClear){
+    catalogClear.addEventListener("click", () => {
+      if (catalogSearch) catalogSearch.value = "";
+      renderCatalogResults("catalogResults", "");
+    });
+  }
+
   $("btnOpenNode").addEventListener("click", () => openNode($("nodeNumber").value));
   $("btnNewNode").addEventListener("click", () => createNode($("nodeNumber").value));
 
@@ -1341,32 +2585,25 @@ function wireUI(){
   }
 
   $("btnAddLocation").addEventListener("click", () => addSpliceLocation());
-  $("btnCaptureGPS").addEventListener("click", () => captureGPS());
 
-  $("btnAttachPhoto").addEventListener("click", () => {
-    const f = $("photoFile").files?.[0];
-    if (!f){
-      toast("Choose a photo", "Pick a photo file first.");
-      return;
-    }
-    attachPhotoToLastIncomplete(f);
-  });
-
-  const proofInput = $("proofPhotoFile");
-  if (proofInput){
-    proofInput.addEventListener("change", () => {
-      const f = proofInput.files?.[0];
-      handleProofFileSelected(f);
-    });
+  const startCameraBtn = $("btnStartCamera");
+  if (startCameraBtn){
+    startCameraBtn.addEventListener("click", () => startCamera());
   }
-  const proofBtn = $("btnCaptureProof");
-  if (proofBtn && proofInput){
-    proofBtn.addEventListener("click", () => proofInput.click());
+  const startCameraNodesBtn = $("btnStartCameraNodes");
+  if (startCameraNodesBtn){
+    startCameraNodesBtn.addEventListener("click", () => startCamera());
+  }
+
+  const photoBtn = $("btnCapturePhoto");
+  if (photoBtn){
+    photoBtn.addEventListener("click", () => captureUsageProof());
   }
 
   $("btnMarkNodeReady").addEventListener("click", () => markNodeReady());
   $("btnCreateInvoice").addEventListener("click", () => createInvoice());
 }
 
+startVisibilityWatch();
 wireUI();
 initAuth();
