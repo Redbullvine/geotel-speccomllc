@@ -1,6 +1,10 @@
 [build]
-  publish = "geotrace"
-  command = "node ./geotrace/netlify-write-env.mjs || true"
+  publish = "."
+  command = "node ./netlify-write-env.mjs || true"
+  functions = "netlify/functions"
+
+[build.environment]
+  APP_MODE = "real"
 
 [[headers]]
   for = "/*"
@@ -8,3 +12,4 @@
     X-Content-Type-Options = "nosniff"
     X-Frame-Options = "DENY"
     Referrer-Policy = "strict-origin-when-cross-origin"
+    Cache-Control = "no-store"
