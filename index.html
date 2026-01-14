@@ -43,6 +43,7 @@
             <button id="btnMagicLink" class="btn secondary">Send magic link</button>
             <button id="btnSignUp" class="btn secondary">Create user</button>
           </div>
+          <div id="authConfigNote" class="muted small" style="display:none; margin-top:8px;">Supabase not configured.</div>
         </div>
       </div>
 
@@ -308,6 +309,7 @@
 
   <script src="/.netlify/functions/app-config"></script>
   <script src="./env.generated.js"></script>
+  <script src="./env.js"></script>
   <script type="module" src="./supabaseClient.js"></script>
   <script type="module" src="./app.js"></script>
 </body>

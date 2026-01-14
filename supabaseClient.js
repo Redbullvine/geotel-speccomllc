@@ -1,8 +1,8 @@
 // Supabase client loader.
 // APP_MODE controls demo vs real; missing keys show a warning in the UI.
 
-const env = window.ENV || {};
-const { SUPABASE_URL, SUPABASE_ANON_KEY, APP_MODE } = env;
+const runtimeEnv = window.__ENV__ || window.__ENV || window.ENV || {};
+const { SUPABASE_URL, SUPABASE_ANON_KEY, APP_MODE } = runtimeEnv;
 
 export const config = {
   url: SUPABASE_URL || "",
@@ -11,15 +11,14 @@ export const config = {
 };
 
 export const appMode = "real";
-export const hasSupabaseConfig = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+export const hasSupabaseConfig = Boolean(config.url && config.anonKey);
 export const isDemo = false;
 
-export function getSupabase(){
-  if (!hasSupabaseConfig) return null;
+let _clientPromise = null;
+let _client = null;
 
-  // Load supabase-js from CDN (keeps the starter zip simple).
-  // Note: You can switch to bundling later.
-  return window.supabase;
+export function getSupabase(){
+  return _client;
 }
 
 export async function ensureSupabaseLoaded(){
@@ -38,13 +37,19 @@ export async function ensureSupabaseLoaded(){
 
 export async function makeClient(){
   if (!hasSupabaseConfig) return null;
-  await ensureSupabaseLoaded();
-  return window.supabase.createClient(config.url, config.anonKey, {
-    auth: {
-      persistSession: true,
-      autoRefreshToken: true,
-      detectSessionInUrl: true,
-      storage: window.localStorage,
-    },
-  });
+  if (_client) return _client;
+  if (_clientPromise) return _clientPromise;
+  _clientPromise = (async () => {
+    await ensureSupabaseLoaded();
+    _client = window.supabase.createClient(config.url, config.anonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        storage: window.localStorage,
+      },
+    });
+    return _client;
+  })();
+  return _clientPromise;
 }

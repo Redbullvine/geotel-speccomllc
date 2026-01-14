@@ -164,6 +164,8 @@ function setAuthButtonsDisabled(disabled){
     const el = $(id);
     if (el) el.disabled = disabled;
   });
+  const note = $("authConfigNote");
+  if (note) note.style.display = disabled ? "" : "none";
 }
 
 function setActiveView(viewId){
@@ -872,14 +874,17 @@ function renderLocations(){
     r.terminal_ports = normalizeTerminalPorts(r.terminal_ports ?? DEFAULT_TERMINAL_PORTS);
     r.photosBySlot = r.photosBySlot || {};
     r.isEditing = Boolean(r.isEditing);
-    const portValue = [2, 4, 6, 8].includes(r.terminal_ports) ? String(r.terminal_ports) : "custom";
-    const customValue = portValue === "custom" ? r.terminal_ports : "";
+    r.isEditingPorts = Boolean(r.isEditingPorts);
+    const activePorts = normalizeTerminalPorts(r.isEditingPorts ? (r.pending_ports ?? r.terminal_ports) : r.terminal_ports);
+    const portValue = [2, 4, 6, 8].includes(activePorts) ? String(activePorts) : "custom";
+    const customValue = portValue === "custom" ? activePorts : "";
     const customStyle = portValue === "custom" ? "" : 'style="display:none;"';
     const counts = countRequiredSlotUploads(r);
     const missing = counts.uploaded < counts.required;
     const disableToggle = !r.completed && missing;
     const billingLocked = isLocationBillingLocked(r.id);
     if (billingLocked && r.isEditing) r.isEditing = false;
+    if (billingLocked && r.isEditingPorts) r.isEditingPorts = false;
     const nameHtml = r.isEditing
       ? `<input class="input" data-action="nameInput" data-id="${r.id}" value="${escapeHtml(r.name)}" ${billingLocked ? "disabled" : ""} data-autofocus="true" />`
       : `<span class="clickable-name" data-action="editName" data-id="${r.id}" ${billingLocked ? "" : ""}>${escapeHtml(r.name)}</span>`;
@@ -900,18 +905,30 @@ function renderLocations(){
         <div>${done}</div>
       </div>
       <div class="hr"></div>
-      <div class="row" style="align-items:flex-end;">
-        <div class="muted small">Terminal ports</div>
-        <select class="input" data-action="portsSelect" data-id="${r.id}" style="width:140px; flex:0 0 auto;" ${billingLocked ? "disabled" : ""}>
-          <option value="2" ${portValue === "2" ? "selected" : ""}>2</option>
-          <option value="4" ${portValue === "4" ? "selected" : ""}>4</option>
-          <option value="6" ${portValue === "6" ? "selected" : ""}>6</option>
-          <option value="8" ${portValue === "8" ? "selected" : ""}>8</option>
-          <option value="custom" ${portValue === "custom" ? "selected" : ""}>Custom</option>
-        </select>
-        <input class="input" type="number" min="1" max="8" step="1" data-action="portsCustom" data-id="${r.id}" value="${customValue}" ${customStyle} style="width:120px; flex:0 0 auto;" ${billingLocked ? "disabled" : ""} />
-        <div class="muted small">Required = ports + 1 completion.</div>
-      </div>
+      ${r.isEditingPorts ? `
+        <div class="row" style="align-items:flex-end;">
+          <div class="muted small">Terminal ports</div>
+          <select class="input" data-action="portsSelect" data-id="${r.id}" style="width:140px; flex:0 0 auto;">
+            <option value="2" ${portValue === "2" ? "selected" : ""}>2</option>
+            <option value="4" ${portValue === "4" ? "selected" : ""}>4</option>
+            <option value="6" ${portValue === "6" ? "selected" : ""}>6</option>
+            <option value="8" ${portValue === "8" ? "selected" : ""}>8</option>
+            <option value="custom" ${portValue === "custom" ? "selected" : ""}>Custom</option>
+          </select>
+          <input class="input" type="number" min="1" max="8" step="1" data-action="portsCustom" data-id="${r.id}" value="${customValue}" ${customStyle} style="width:120px; flex:0 0 auto;" />
+          <div class="muted small">Required = ports + 1 completion.</div>
+        </div>
+        <div class="row" style="justify-content:flex-end;">
+          <button class="btn ghost" data-action="cancelPorts" data-id="${r.id}">Cancel</button>
+          <button class="btn secondary" data-action="savePorts" data-id="${r.id}">Save ports</button>
+        </div>
+        <div class="muted small">Required photos update after Save.</div>
+      ` : `
+        <div class="row" style="align-items:center; justify-content:space-between;">
+          <div class="muted small">Ports required: <b>${activePorts}</b></div>
+          <button class="btn ghost" data-action="editPorts" data-id="${r.id}" ${billingLocked ? "disabled" : ""}>Edit ports</button>
+        </div>
+      `}
       <div class="hr"></div>
       ${renderSplicePhotoGrid(r)}
       <div class="hr"></div>
@@ -937,18 +954,20 @@ function renderLocations(){
       const loc = node.splice_locations.find(x => x.id === target.dataset.id);
       if (!loc) return;
       if (target.value === "custom"){
-        loc.terminal_ports = normalizeTerminalPorts(loc.terminal_ports ?? DEFAULT_TERMINAL_PORTS);
+        loc.pending_ports = normalizeTerminalPorts(loc.pending_ports ?? loc.terminal_ports ?? DEFAULT_TERMINAL_PORTS);
         renderLocations();
         return;
       }
-      const nextPorts = normalizeTerminalPorts(target.value);
-      await updateTerminalPorts(loc.id, nextPorts);
+      loc.pending_ports = normalizeTerminalPorts(target.value);
+      renderLocations();
       return;
     }
     if (target.dataset.action === "portsCustom"){
+      const loc = node.splice_locations.find(x => x.id === target.dataset.id);
+      if (!loc) return;
       const nextPorts = normalizeTerminalPorts(target.value);
+      loc.pending_ports = nextPorts;
       target.value = String(nextPorts);
-      await updateTerminalPorts(target.dataset.id, nextPorts);
     }
   });
 
@@ -978,6 +997,38 @@ function renderLocations(){
     if (!btn) return;
     const action = btn.dataset.action;
     const id = btn.dataset.id;
+    if (action === "editPorts"){
+      const loc = node.splice_locations.find(x => x.id === id);
+      if (!loc) return;
+      if (isLocationBillingLocked(loc.id)){
+        toast("Billing locked", "Terminal ports are locked after billing is ready.");
+        return;
+      }
+      loc.isEditingPorts = true;
+      loc.pending_ports = loc.terminal_ports;
+      renderLocations();
+      return;
+    }
+    if (action === "cancelPorts"){
+      const loc = node.splice_locations.find(x => x.id === id);
+      if (!loc) return;
+      loc.isEditingPorts = false;
+      loc.pending_ports = null;
+      renderLocations();
+      return;
+    }
+    if (action === "savePorts"){
+      const loc = node.splice_locations.find(x => x.id === id);
+      if (!loc) return;
+      const nextPorts = normalizeTerminalPorts(loc.pending_ports ?? loc.terminal_ports);
+      const ok = await updateTerminalPorts(loc.id, nextPorts);
+      if (ok){
+        loc.isEditingPorts = false;
+        loc.pending_ports = null;
+        renderLocations();
+      }
+      return;
+    }
     if (action === "toggleComplete"){
       const loc = node.splice_locations.find(x => x.id === id);
       if (!loc) return;
@@ -1085,21 +1136,21 @@ function renderSpliceSlotCard(loc, slotKey, isRequired){
 
 async function updateTerminalPorts(locationId, nextPorts){
   const node = state.activeNode;
-  if (!node) return;
+  if (!node) return false;
   const loc = node.splice_locations.find(x => x.id === locationId);
-  if (!loc) return;
+  if (!loc) return false;
   if (isLocationBillingLocked(loc.id)){
     toast("Billing locked", "Terminal ports are locked after billing is ready.");
-    return;
+    return false;
   }
   const normalized = normalizeTerminalPorts(nextPorts);
-  if (normalized === loc.terminal_ports) return;
+  if (normalized === loc.terminal_ports) return true;
   if (isDemo){
     loc.terminal_ports = normalized;
     renderLocations();
     renderProofChecklist();
     toast("Ports saved", `Terminal ports set to ${normalized}.`);
-    return;
+    return true;
   }
   const { error } = await state.client
     .from("splice_locations")
@@ -1107,12 +1158,13 @@ async function updateTerminalPorts(locationId, nextPorts){
     .eq("id", loc.id);
   if (error){
     toast("Update failed", error.message);
-    return;
+    return false;
   }
   loc.terminal_ports = normalized;
   renderLocations();
   renderProofChecklist();
   toast("Ports saved", `Terminal ports set to ${normalized}.`);
+  return true;
 }
 
 async function saveSpliceLocationName(locationId, nextName){
@@ -2887,7 +2939,7 @@ function renderBackfillPanel(){
   const options = ['<option value=\"\">Select splice location</option>'].concat(
     locs.map((loc) => `<option value=\"${loc.id}\">${escapeHtml(loc.name || loc.location_label || loc.id)}</option>`)
   );
-  select.innerHTML = options.join(\"\");
+  select.innerHTML = options.join("");
   if (current && locs.some(l => l.id === current)){
     select.value = current;
   }
@@ -3419,6 +3471,11 @@ async function initAuth(){
   }
 
   state.client = await makeClient();
+  if (!state.client){
+    showAuth(true);
+    setAuthButtonsDisabled(true);
+    return;
+  }
   setAuthButtonsDisabled(false);
 
   // Demo: choose role via prompt for now
