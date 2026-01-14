@@ -165,11 +165,13 @@
           </div>
         </section>
 
+
+
         <section id="viewPhotos" class="view">
           <div class="grid cols-2">
             <div class="card">
               <h2>Photo checklist</h2>
-              <div class="no-pay-banner">Photos missing → Cannot bill → No pay</div>
+              <div class="no-pay-banner">Photos missing - Cannot bill - No pay</div>
               <div id="photoChecklist"></div>
             </div>
             <div class="card">
@@ -184,15 +186,32 @@
               </div>
               <div id="photoStatus" class="muted small" style="margin-top:10px;">No photo captured</div>
               <div id="photoPreview" class="photo-preview" style="margin-top:12px;"></div>
+              <div class="hr"></div>
+              <div id="backfillPanel" class="note backfill-panel" style="display:none;">
+                <div style="font-weight:900;">Owner backfill</div>
+                <div class="muted small">Upload from device when backfill is enabled for this node.</div>
+                <div class="row" style="flex-wrap:wrap; margin-top:8px;">
+                  <select id="backfillLocationSelect" class="input" style="min-width:220px; flex:1 1 auto;"></select>
+                </div>
+                <div class="row" style="flex-wrap:wrap; margin-top:8px;">
+                  <label class="btn ghost file-btn">
+                    Upload from device (Port test)
+                    <input id="backfillPortInput" type="file" accept="image/*" />
+                  </label>
+                  <label class="btn ghost file-btn">
+                    Upload from device (Splice complete)
+                    <input id="backfillSpliceInput" type="file" accept="image/*" />
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
         </section>
-
         <section id="viewInvoices" class="view">
           <div class="grid cols-2">
             <div class="card">
               <h2>Invoice actions</h2>
-              <div class="no-pay-banner">Photos missing → Cannot bill → No pay</div>
+              <div class="no-pay-banner">Photos missing - Cannot bill - No pay</div>
               <div class="muted small">Billing entry is blocked until photos are complete.</div>
               <div class="row" style="margin-top:12px;">
                 <button id="btnMarkNodeReady" class="btn">Mark node READY for billing</button>

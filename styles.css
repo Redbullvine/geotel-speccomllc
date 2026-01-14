@@ -180,6 +180,16 @@ h2::after{
   background: rgba(7,26,43,.7);
   padding:12px; border-radius: 14px;
 }
+.note.warning{
+  border-color: rgba(245,158,11,.6);
+  background: rgba(60,30,0,.25);
+}
+.backfill-panel{
+  margin-top:12px;
+}
+.file-btn input[type="file"]{
+  display:none;
+}
 .pill-ok{color:var(--ok); font-weight:900}
 .pill-warn{color:var(--warn); font-weight:900}
 .pill-bad{color:var(--bad); font-weight:900}
@@ -391,6 +401,9 @@ img.item-photo{width:100%; max-width: 420px; border-radius: 14px; border:1px sol
   display:flex;
   flex-direction:column;
   gap:12px;
+}
+.clickable-name{
+  cursor:pointer;
 }
 .billing-location-card{
   border:1px solid var(--line);

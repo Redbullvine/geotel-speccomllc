@@ -20,6 +20,8 @@ const state = {
   locationProofRules: [],
   activeRateCardId: null,
   locationWorkCodes: new Map(),
+  nodeProofStatus: null,
+  ownerOverrides: [],
   billingStatus: null,
   lastGPS: null,
   lastProof: null,
@@ -116,6 +118,19 @@ function hasAllRequiredSlotPhotos(loc){
   return required.length > 0 && required.every((slot) => Boolean(photos[slot]));
 }
 
+function getBackfillSlotKey(loc, photoType){
+  if (photoType === "splice_complete") return "splice_completion";
+  const photos = loc?.photosBySlot || {};
+  const requiredPorts = getRequiredSlotsForLocation(loc).filter(slot => slot.startsWith("port_"));
+  const missingRequired = requiredPorts.find(slot => !photos[slot]);
+  if (missingRequired) return missingRequired;
+  for (let i = 1; i <= MAX_TERMINAL_PORTS; i += 1){
+    const slot = `port_${i}`;
+    if (!photos[slot]) return slot;
+  }
+  return null;
+}
+
 function setText(id, value){
   const el = $(id);
   if (el) el.textContent = value;
@@ -176,6 +191,15 @@ function getRole(){
 function isBillingManager(){
   const role = getRole();
   return role === "OWNER" || role === "PRIME" || role === "TDS";
+}
+
+function isOwner(){
+  return getRole() === "OWNER";
+}
+
+function isBillingUnlocked(){
+  if (isDemo) return true;
+  return Boolean(state.nodeProofStatus?.billing_unlocked);
 }
 
 function formatMoney(value){
@@ -667,6 +691,32 @@ async function loadLocationProofRequirements(projectId){
   state.locationProofRules = data || [];
 }
 
+async function loadNodeProofStatus(nodeId){
+  if (!nodeId || isDemo) return;
+  const { data, error } = await state.client
+    .rpc("node_proof_status", { p_node_id: nodeId });
+  if (error){
+    toast("Proof status error", error.message);
+    return;
+  }
+  state.nodeProofStatus = data || null;
+  renderBackfillPanel();
+}
+
+async function loadOwnerOverrides(nodeId){
+  if (!nodeId || isDemo) return;
+  const { data, error } = await state.client
+    .from("owner_overrides")
+    .select("id, override_type, reason, created_at, node_id, invoice_id")
+    .eq("node_id", nodeId)
+    .order("created_at", { ascending: false });
+  if (error){
+    toast("Overrides load error", error.message);
+    return;
+  }
+  state.ownerOverrides = data || [];
+}
+
 async function loadBillingLocations(projectId){
   if (!projectId){
     state.billingLocations = [];
@@ -703,6 +753,8 @@ async function loadBillingLocations(projectId){
   let counts = new Map();
   let invoiceStatus = new Map();
   let invoiceIdsByLocation = new Map();
+  let proofRequiredByLocation = new Map();
+  let proofUploadedByLocation = new Map();
   if (locationIds.length){
     const { data: photos, error: photoErr } = await state.client
       .from("splice_location_photos")
@@ -713,6 +765,16 @@ async function loadBillingLocations(projectId){
     } else {
       (photos || []).forEach((row) => {
         counts.set(row.splice_location_id, (counts.get(row.splice_location_id) || 0) + 1);
+      });
+    }
+    const { data: proofRows, error: proofErr } = await state.client
+      .from("location_proof_status")
+      .select("location_id, proof_required, proof_uploaded")
+      .in("location_id", locationIds);
+    if (!proofErr){
+      (proofRows || []).forEach((row) => {
+        proofRequiredByLocation.set(row.location_id, Number(row.proof_required || 0));
+        proofUploadedByLocation.set(row.location_id, Number(row.proof_uploaded || 0));
       });
     }
     const { data: invoices } = await state.client
@@ -754,7 +816,8 @@ async function loadBillingLocations(projectId){
     location_label: loc.location_label,
     completed: loc.completed,
     terminal_ports: normalizeTerminalPorts(loc.terminal_ports ?? DEFAULT_TERMINAL_PORTS),
-    photo_count: counts.get(loc.id) || 0,
+    photo_count: proofUploadedByLocation.get(loc.id) ?? counts.get(loc.id) ?? 0,
+    proof_required: proofRequiredByLocation.get(loc.id),
     node_number: loc.nodes?.node_number || "",
     invoice_status: invoiceStatus.get(loc.id) || "draft",
   }));
@@ -808,12 +871,18 @@ function renderLocations(){
   rows.forEach((r) => {
     r.terminal_ports = normalizeTerminalPorts(r.terminal_ports ?? DEFAULT_TERMINAL_PORTS);
     r.photosBySlot = r.photosBySlot || {};
+    r.isEditing = Boolean(r.isEditing);
     const portValue = [2, 4, 6, 8].includes(r.terminal_ports) ? String(r.terminal_ports) : "custom";
     const customValue = portValue === "custom" ? r.terminal_ports : "";
     const customStyle = portValue === "custom" ? "" : 'style="display:none;"';
     const counts = countRequiredSlotUploads(r);
     const missing = counts.uploaded < counts.required;
     const disableToggle = !r.completed && missing;
+    const billingLocked = isLocationBillingLocked(r.id);
+    if (billingLocked && r.isEditing) r.isEditing = false;
+    const nameHtml = r.isEditing
+      ? `<input class="input" data-action="nameInput" data-id="${r.id}" value="${escapeHtml(r.name)}" ${billingLocked ? "disabled" : ""} data-autofocus="true" />`
+      : `<span class="clickable-name" data-action="editName" data-id="${r.id}" ${billingLocked ? "" : ""}>${escapeHtml(r.name)}</span>`;
     const workCodes = state.locationWorkCodes?.get(r.id);
     const workCodesLabel = workCodes && workCodes.size ? Array.from(workCodes).join(", ") : "None";
     const done = r.completed ? '<span class="pill-ok">COMPLETE</span>' : '<span class="pill-warn">INCOMPLETE</span>';
@@ -823,7 +892,7 @@ function renderLocations(){
     card.innerHTML = `
       <div class="row" style="justify-content:space-between;">
         <div>
-          <div style="font-weight:900">${escapeHtml(r.name)}</div>
+          <div style="font-weight:900">${nameHtml}</div>
           <div class="muted small">${escapeHtml(r.id)}</div>
           <div class="muted small">Photos: <b>${counts.uploaded}/${counts.required}</b> required</div>
           <div class="muted small">Work codes logged here: <b>${escapeHtml(workCodesLabel)}</b></div>
@@ -885,6 +954,18 @@ function renderLocations(){
 
   list.addEventListener("click", async (e) => {
     const btn = e.target.closest("button");
+    const label = e.target.closest("[data-action='editName']");
+    if (label){
+      const loc = node.splice_locations.find(x => x.id === label.dataset.id);
+      if (!loc) return;
+      if (isLocationBillingLocked(loc.id)){
+        toast("Billing locked", "Location name is locked after billing is ready.");
+        return;
+      }
+      loc.isEditing = true;
+      renderLocations();
+      return;
+    }
     if (!btn) return;
     const action = btn.dataset.action;
     const id = btn.dataset.id;
@@ -919,6 +1000,23 @@ function renderLocations(){
   });
 
   wrap.appendChild(list);
+
+  const nameInput = wrap.querySelector("[data-autofocus='true']");
+  if (nameInput){
+    setTimeout(() => {
+      nameInput.focus();
+      nameInput.select();
+    }, 0);
+    nameInput.addEventListener("blur", async () => {
+      await saveSpliceLocationName(nameInput.dataset.id, nameInput.value);
+    });
+    nameInput.addEventListener("keydown", async (e) => {
+      if (e.key === "Enter"){
+        e.preventDefault();
+        await saveSpliceLocationName(nameInput.dataset.id, nameInput.value);
+      }
+    });
+  }
 }
 
 function renderSplicePhotoGrid(loc){
@@ -994,6 +1092,47 @@ async function updateTerminalPorts(locationId, nextPorts){
   loc.terminal_ports = normalized;
   renderLocations();
   renderProofChecklist();
+}
+
+async function saveSpliceLocationName(locationId, nextName){
+  const node = state.activeNode;
+  if (!node) return;
+  const loc = node.splice_locations.find(x => x.id === locationId);
+  if (!loc) return;
+  if (isLocationBillingLocked(loc.id)){
+    toast("Billing locked", "Location name is locked after billing is ready.");
+    loc.isEditing = false;
+    renderLocations();
+    return;
+  }
+  const trimmed = String(nextName || "").trim();
+  if (!trimmed){
+    toast("Name required", "Enter a location name.");
+    renderLocations();
+    return;
+  }
+  if (trimmed === loc.name){
+    loc.isEditing = false;
+    renderLocations();
+    return;
+  }
+  if (isDemo){
+    loc.name = trimmed;
+    loc.isEditing = false;
+    renderLocations();
+    return;
+  }
+  const { error } = await state.client
+    .from("splice_locations")
+    .update({ location_label: trimmed })
+    .eq("id", loc.id);
+  if (error){
+    toast("Rename failed", error.message);
+    return;
+  }
+  loc.name = trimmed;
+  loc.isEditing = false;
+  renderLocations();
 }
 
 async function handleSpliceSlotPhotoUpload(locationId, slotKey, file){
@@ -1216,6 +1355,114 @@ async function captureUsageProof(){
     camera: true,
   };
   setProofStatus();
+}
+
+async function uploadBackfillPhoto(file, projectId, nodeId, locationId, photoType){
+  if (!state.client) return null;
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const ts = Date.now();
+  const root = projectId || "project";
+  const path = `${root}/${nodeId}/${locationId}/${photoType}/${ts}-${safeName}`;
+  const { data, error } = await state.client
+    .storage
+    .from("proof-photos")
+    .upload(path, file, { contentType: file.type });
+  if (error){
+    toast("Upload failed", error.message);
+    return null;
+  }
+  return data?.path || path;
+}
+
+async function handleBackfillPhotoUpload(photoType, file){
+  const node = state.activeNode;
+  const projectId = state.activeProject?.id || null;
+  if (!node){
+    toast("Open a node", "Select or open a node first.");
+    return;
+  }
+  if (!isOwner()){
+    toast("Not allowed", "Owner role required.");
+    return;
+  }
+  if (!state.nodeProofStatus?.backfill_allowed){
+    toast("Backfill locked", "Backfill is not enabled for this node.");
+    return;
+  }
+  if (!file){
+    toast("Choose a photo", "Pick a photo file first.");
+    return;
+  }
+  const locId = $("backfillLocationSelect")?.value;
+  if (!locId){
+    toast("Location required", "Select a splice location first.");
+    return;
+  }
+  const loc = node.splice_locations.find(l => l.id === locId);
+  if (!loc){
+    toast("Location missing", "Splice location not found.");
+    return;
+  }
+  const slotKey = getBackfillSlotKey(loc, photoType);
+  if (!slotKey){
+    toast("Slots full", "All port slots already have photos. Use the slot grid to retake.");
+    return;
+  }
+  const previewUrl = URL.createObjectURL(file);
+  const exifTakenAt = file.lastModified ? new Date(file.lastModified).toISOString() : null;
+  const takenAt = exifTakenAt || nowISO();
+  loc.photosBySlot = loc.photosBySlot || {};
+  loc.photosBySlot[slotKey] = { previewUrl, taken_at: takenAt, pending: true, backfilled: true };
+  renderLocations();
+  renderProofChecklist();
+
+  if (isDemo){
+    loc.photosBySlot[slotKey] = { previewUrl, taken_at: takenAt, backfilled: true };
+    renderLocations();
+    renderProofChecklist();
+    return;
+  }
+
+  const uploadPath = await uploadBackfillPhoto(file, projectId, node.id, loc.id, photoType);
+  if (!uploadPath){
+    delete loc.photosBySlot[slotKey];
+    renderLocations();
+    renderProofChecklist();
+    return;
+  }
+
+  const { data, error } = await state.client
+    .from("splice_location_photos")
+    .upsert({
+      splice_location_id: loc.id,
+      slot_key: slotKey,
+      photo_path: uploadPath,
+      taken_at: takenAt,
+      uploaded_by: state.user?.id || null,
+      source: "upload",
+      backfilled: true,
+      exif_taken_at: exifTakenAt,
+    }, { onConflict: "splice_location_id,slot_key" })
+    .select("photo_path, taken_at")
+    .maybeSingle();
+
+  if (error){
+    delete loc.photosBySlot[slotKey];
+    renderLocations();
+    renderProofChecklist();
+    toast("Upload failed", error.message);
+    return;
+  }
+
+  loc.photosBySlot[slotKey] = {
+    path: data?.photo_path || uploadPath,
+    taken_at: data?.taken_at || takenAt,
+    previewUrl,
+    backfilled: true,
+  };
+  await loadNodeProofStatus(node.id);
+  renderLocations();
+  renderProofChecklist();
 }
 
 async function uploadProofPhoto(file, nodeId, prefix){
@@ -1521,6 +1768,7 @@ function renderInvoicePanel(){
   wrap.innerHTML = html;
 }
 
+
 function renderBillingLocations(){
   const wrap = $("billingLocationList");
   const status = $("billingStatus");
@@ -1543,7 +1791,7 @@ function renderBillingLocations(){
     const proofLabel = required === 0 ? "Proof: Not required" : `Proof: ${uploaded}/${required}`;
     const invoiceStatus = loc.invoice_status || "draft";
     const invoiceLabel = invoiceStatus.toUpperCase();
-    const disabled = !proofOk;
+    const disabled = !proofOk && !isOwner();
     return `
       <div class="billing-location-card ${disabled ? "disabled" : ""}">
         <div class="row" style="justify-content:space-between;">
@@ -1551,7 +1799,7 @@ function renderBillingLocations(){
             <div style="font-weight:900">${escapeHtml(loc.location_label || "Splice location")}</div>
             <div class="muted small">${escapeHtml(loc.node_number || "")}</div>
           </div>
-          <span class="status-pill ${proofOk ? "ok" : "warn"}">${proofLabel} ${proofOk ? "✅" : "🔒"}</span>
+          <span class="status-pill ${proofOk ? "ok" : "warn"}">${proofLabel} ${proofOk ? "OK" : "LOCKED"}</span>
         </div>
         <div class="row" style="justify-content:space-between;">
           <span class="status-pill">${invoiceLabel}</span>
@@ -1561,6 +1809,7 @@ function renderBillingLocations(){
     `;
   }).join("");
 }
+
 
 function renderBillingDetail(){
   const wrap = $("billingDetail");
@@ -1586,16 +1835,43 @@ function renderBillingDetail(){
   const totals = computeInvoiceTotals(items);
   const status = invoice?.status || "draft";
   const locked = ["submitted", "paid", "void"].includes(status);
+  const billingUnlocked = isBillingUnlocked();
+  const editLocked = locked || !billingUnlocked;
   const rateCard = state.rateCards.find(r => r.id === state.activeRateCardId);
+  const overrides = state.ownerOverrides || [];
+  const hasOverride = overrides.length > 0;
+  const showOverrideAction = !billingUnlocked && isOwner() && !isDemo;
 
   wrap.innerHTML = `
     <div class="note">
       <div style="font-weight:900;">${escapeHtml(loc.location_label || "Location")}</div>
       <div class="muted small">Node: ${escapeHtml(loc.node_number || "-")}</div>
-      <div class="muted small">Proof: ${proofLabel} ${proofOk ? "✅" : "🔒"}</div>
+      <div class="muted small">Proof: ${proofLabel} ${proofOk ? "OK" : "LOCKED"}</div>
       <div class="muted small">Rate card: ${escapeHtml(rateCard?.name || "Default")}</div>
       <div class="muted small">Status: ${escapeHtml(status.toUpperCase())}</div>
+      ${hasOverride ? '<div class="muted small">Override: ACTIVE</div>' : ""}
     </div>
+    ${!billingUnlocked ? `
+      <div class="note warning" style="margin-top:12px;">
+        <div style="font-weight:900;">Billing locked</div>
+        <div class="muted small">Proof is incomplete for this node. Owner can apply an override if needed.</div>
+        ${showOverrideAction ? '<button id="btnOwnerOverride" class="btn secondary" style="margin-top:10px;">Owner override</button>' : ""}
+      </div>
+    ` : ""}
+    ${showOverrideAction ? `
+      <div id="ownerOverridePanel" class="note override-panel" style="display:none; margin-top:12px;">
+        <div style="font-weight:900;">Owner override</div>
+        <div class="muted small" style="margin-bottom:8px;">Reason is required for audit.</div>
+        <div class="row" style="flex-wrap:wrap;">
+          <select id="ownerOverrideType" class="input" style="width:220px;">
+            <option value="BILLING_UNLOCKED">Unlock billing</option>
+            <option value="BACKFILL_ALLOWED">Allow backfill uploads</option>
+          </select>
+          <input id="ownerOverrideReason" class="input" placeholder="Reason (required)" style="min-width:220px; flex:1 1 auto;" />
+          <button id="btnApplyOwnerOverride" class="btn">Apply</button>
+        </div>
+      </div>
+    ` : ""}
     <div class="hr"></div>
     <table class="table billing-table">
       <thead>
@@ -1610,11 +1886,11 @@ function renderBillingDetail(){
         </tr>
       </thead>
       <tbody>
-        ${items.map((item, idx) => renderBillingItemRow(item, idx, canEditRates && !locked, locked)).join("")}
+        ${items.map((item, idx) => renderBillingItemRow(item, idx, canEditRates && !editLocked, editLocked)).join("")}
       </tbody>
     </table>
     <div class="billing-actions">
-      <button id="btnAddLineItem" class="btn secondary" ${locked ? "disabled" : ""}>Add line item</button>
+      <button id="btnAddLineItem" class="btn secondary" ${editLocked ? "disabled" : ""}>Add line item</button>
     </div>
     <div class="hr"></div>
     <div class="billing-summary">
@@ -1625,11 +1901,11 @@ function renderBillingDetail(){
     <div class="hr"></div>
     <div>
       <div class="muted small">Notes</div>
-      <textarea id="billingNotes" class="input" rows="3" style="width:100%;" ${locked ? "disabled" : ""}>${escapeHtml(invoice?.notes || "")}</textarea>
+      <textarea id="billingNotes" class="input" rows="3" style="width:100%;" ${editLocked ? "disabled" : ""}>${escapeHtml(invoice?.notes || "")}</textarea>
     </div>
     <div class="billing-actions">
-      <button id="btnBillingSave" class="btn" ${locked ? "disabled" : ""}>Save</button>
-      <button id="btnBillingReady" class="btn secondary" ${locked || !proofOk || !hasBillableItems(items) ? "disabled" : ""}>Ready to submit</button>
+      <button id="btnBillingSave" class="btn" ${editLocked ? "disabled" : ""}>Save</button>
+      <button id="btnBillingReady" class="btn secondary" ${editLocked || !hasBillableItems(items) ? "disabled" : ""}>Ready to submit</button>
     </div>
   `;
 
@@ -1656,10 +1932,26 @@ function renderBillingDetail(){
   const readyBtn = wrap.querySelector("#btnBillingReady");
   if (readyBtn) readyBtn.addEventListener("click", () => markInvoiceReady());
 
+  const overrideBtn = wrap.querySelector("#btnOwnerOverride");
+  if (overrideBtn){
+    overrideBtn.addEventListener("click", () => {
+      const panel = wrap.querySelector("#ownerOverridePanel");
+      if (panel) panel.style.display = "";
+    });
+  }
+  const applyOverrideBtn = wrap.querySelector("#btnApplyOwnerOverride");
+  if (applyOverrideBtn){
+    applyOverrideBtn.addEventListener("click", () => {
+      const type = wrap.querySelector("#ownerOverrideType")?.value || "";
+      const reason = wrap.querySelector("#ownerOverrideReason")?.value || "";
+      createOwnerOverride(type, reason);
+    });
+  }
+
   const canExport = ["ready", "submitted", "paid"].includes(status);
   if (exportBtn) exportBtn.disabled = !canExport;
   if (printBtn) printBtn.disabled = !canExport;
-  if (importBtn) importBtn.disabled = locked;
+  if (importBtn) importBtn.disabled = editLocked;
 }
 
 function renderBillingItemRow(item, idx, canEditRates, locked){
@@ -1750,6 +2042,8 @@ async function openBillingLocation(locationId){
   const loc = (state.billingLocations || []).find(l => l.id === locationId);
   if (!loc) return;
   state.billingLocation = loc;
+  await loadNodeProofStatus(loc.node_id);
+  await loadOwnerOverrides(loc.node_id);
   if (!state.activeRateCardId && state.rateCards.length){
     state.activeRateCardId = state.rateCards[0].id;
     await loadRateCardItems(state.activeRateCardId);
@@ -1841,6 +2135,10 @@ async function saveBillingInvoice(){
     toast("No invoice", "Select a location first.");
     return;
   }
+  if (!isBillingUnlocked()){
+    toast("Billing locked", "Proof is incomplete for this node.");
+    return;
+  }
   const totals = computeInvoiceTotals(state.billingItems);
   const notes = $("billingNotes")?.value || "";
 
@@ -1913,15 +2211,12 @@ async function markInvoiceReady(){
     toast("No invoice", "Select a location first.");
     return;
   }
-  if (!hasBillableItems(state.billingItems)){
-    toast("Missing items", "Add at least one line item with qty.");
+  if (!isBillingUnlocked()){
+    toast("Billing locked", "Proof is incomplete for this node.");
     return;
   }
-  const loc = state.billingLocation;
-  const required = getLocationRequiredPhotos(loc, state.activeProject?.id);
-  const uploaded = loc?.photo_count || 0;
-  if (uploaded < required){
-    toast("Proof missing", "Proof photos are required before submission.");
+  if (!hasBillableItems(state.billingItems)){
+    toast("Missing items", "Add at least one line item with qty.");
     return;
   }
   if (isDemo){
@@ -1944,6 +2239,54 @@ async function markInvoiceReady(){
   renderBillingDetail();
 }
 
+async function createOwnerOverride(overrideType, reason){
+  if (!isOwner()){
+    toast("Not allowed", "Owner role required.");
+    return;
+  }
+  const loc = state.billingLocation;
+  const projectId = state.activeProject?.id || null;
+  const nodeId = loc?.node_id || null;
+  const trimmed = String(reason || "").trim();
+  if (!projectId || !nodeId){
+    toast("Missing context", "Select a location first.");
+    return;
+  }
+  if (!trimmed){
+    toast("Reason required", "Provide a reason for the override.");
+    return;
+  }
+  if (isDemo){
+    state.ownerOverrides = state.ownerOverrides || [];
+    state.ownerOverrides.unshift({
+      id: `override-${Date.now()}`,
+      override_type: overrideType,
+      reason: trimmed,
+      created_at: nowISO(),
+      node_id: nodeId,
+    });
+    toast("Override added", "Override applied (demo).");
+    renderBillingDetail();
+    return;
+  }
+  const { error } = await state.client
+    .rpc("create_owner_override", {
+      project_id: projectId,
+      node_id: nodeId,
+      override_type: overrideType,
+      reason: trimmed,
+      splice_location_id: null,
+    });
+  if (error){
+    toast("Override failed", error.message);
+    return;
+  }
+  toast("Override added", "Override applied.");
+  await loadOwnerOverrides(nodeId);
+  await loadNodeProofStatus(nodeId);
+  renderBillingDetail();
+}
+
 async function generateInvoiceNumber(){
   const year = new Date().getFullYear();
   if (isDemo) return `SC-${year}-0001`;
@@ -1961,6 +2304,7 @@ function exportInvoiceCsv(){
   const loc = state.billingLocation;
   if (!invoice || !loc) return;
   const project = state.activeProject;
+  const overrideUsed = (state.ownerOverrides || []).length > 0;
   const header = [
     ["Invoice Number", invoice.invoice_number || ""],
     ["Project", project?.name || ""],
@@ -1970,6 +2314,7 @@ function exportInvoiceCsv(){
     ["Prepared At", new Date().toLocaleString()],
     ["Work Codes", (state.billingItems || []).map(i => getWorkCodeById(i.work_code_id)?.code).filter(Boolean).join(", ")],
     ["Status", invoice.status || ""],
+    ["Override Used", overrideUsed ? "Yes" : "No"],
   ];
   const rows = (state.billingItems || []).map((item) => ([
     getWorkCodeById(item.work_code_id)?.code || "",
@@ -2014,6 +2359,7 @@ function printInvoice(){
   const totals = computeInvoiceTotals(items);
   const now = new Date().toLocaleString();
   const codeList = items.map(i => getWorkCodeById(i.work_code_id)?.code).filter(Boolean).join(", ");
+  const overrideUsed = (state.ownerOverrides || []).length > 0;
   const html = `
     <html>
       <head>
@@ -2034,6 +2380,7 @@ function printInvoice(){
         <div class="meta">Prepared by: ${escapeHtml(state.profile?.display_name || state.user?.email || "")}</div>
         <div class="meta">Prepared at: ${escapeHtml(now)}</div>
         <div class="meta">Work codes: ${escapeHtml(codeList || "-")}</div>
+        <div class="meta">Override used: ${overrideUsed ? "Yes" : "No"}</div>
         <table>
           <thead><tr><th>Work Code</th><th>Description</th><th>Unit</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>
           <tbody>
@@ -2171,6 +2518,9 @@ function getLocationProofRule(projectId){
 }
 
 function getLocationRequiredPhotos(loc, projectId){
+  if (loc && Number.isFinite(loc.proof_required)){
+    return Math.max(0, Number(loc.proof_required || 0));
+  }
   const rule = getLocationProofRule(projectId);
   if (rule && Number.isFinite(rule.required_photos)){
     return Math.max(0, rule.required_photos);
@@ -2182,6 +2532,16 @@ function getLocationRequiredPhotos(loc, projectId){
 function getLocationProofUploaded(loc){
   const photos = loc?.photosBySlot || {};
   return Object.keys(photos).length;
+}
+
+function getLocationBillingStatus(locationId){
+  const row = (state.billingLocations || []).find(l => l.id === locationId);
+  return row?.invoice_status || "draft";
+}
+
+function isLocationBillingLocked(locationId){
+  const status = getLocationBillingStatus(locationId);
+  return ["ready", "submitted", "paid", "void"].includes(String(status).toLowerCase());
 }
 
 function getRemainingForItem(item){
@@ -2390,6 +2750,7 @@ function renderProofChecklist(){
   if (!node){
     wrap.innerHTML = '<div class="muted small">Open a node to see photo requirements.</div>';
     summary.innerHTML = '<div class="muted small">No node selected.</div>';
+    renderBackfillPanel();
     return;
   }
 
@@ -2436,6 +2797,29 @@ function renderProofChecklist(){
       </tbody>
     </table>
   `;
+  renderBackfillPanel();
+}
+
+function renderBackfillPanel(){
+  const panel = $("backfillPanel");
+  const select = $("backfillLocationSelect");
+  if (!panel || !select) return;
+  const node = state.activeNode;
+  const allowed = isOwner() && Boolean(state.nodeProofStatus?.backfill_allowed) && !isDemo;
+  if (!node || !allowed){
+    panel.style.display = "none";
+    return;
+  }
+  panel.style.display = "";
+  const locs = node.splice_locations || [];
+  const current = select.value;
+  const options = ['<option value=\"\">Select splice location</option>'].concat(
+    locs.map((loc) => `<option value=\"${loc.id}\">${escapeHtml(loc.name || loc.location_label || loc.id)}</option>`)
+  );
+  select.innerHTML = options.join(\"\");
+  if (current && locs.some(l => l.id === current)){
+    select.value = current;
+  }
 }
 
 async function captureGPS(){
@@ -2546,17 +2930,19 @@ async function addSpliceLocation(){
   const node = state.activeNode;
   if (!node) return;
   const n = (node.splice_locations?.length || 0) + 1;
+  const tempName = `Splice location ${n}`;
   if (isDemo){
     node.splice_locations = node.splice_locations || [];
     node.splice_locations.push({
       id: `loc-${Date.now()}`,
-      name: `Splice location ${n}`,
+      name: tempName,
       gps: null,
       photo: null,
       taken_at: null,
       completed: false,
       terminal_ports: DEFAULT_TERMINAL_PORTS,
       photosBySlot: {},
+      isEditing: true,
     });
     renderLocations();
     updateKPI();
@@ -2568,7 +2954,7 @@ async function addSpliceLocation(){
     .from("splice_locations")
     .insert({
       node_id: node.id,
-      location_label: `Splice location ${n}`,
+      location_label: tempName,
       terminal_ports: DEFAULT_TERMINAL_PORTS,
     })
     .select("id, location_label, gps_lat, gps_lng, gps_accuracy_m, photo_path, taken_at, completed, terminal_ports")
@@ -2590,6 +2976,7 @@ async function addSpliceLocation(){
     completed: data.completed,
     terminal_ports: normalizeTerminalPorts(data.terminal_ports ?? DEFAULT_TERMINAL_PORTS),
     photosBySlot: {},
+    isEditing: true,
   });
   renderLocations();
   updateKPI();
@@ -2769,6 +3156,8 @@ async function openNode(nodeNumber){
   await loadSplicePhotos(node.id, node.splice_locations);
   await loadAllowedQuantities(node.id);
   await loadAlerts(node.id);
+  await loadNodeProofStatus(node.id);
+  await loadOwnerOverrides(node.id);
   subscribeUsageEvents(node.id);
 
   setRoleUI();
@@ -2778,6 +3167,7 @@ async function openNode(nodeNumber){
   renderAllowedQuantities();
   renderAlerts();
   renderProofChecklist();
+  renderBillingDetail();
   updateKPI();
   await loadProjectNodes(node.project_id);
 }
@@ -3219,6 +3609,21 @@ function wireUI(){
   const photoBtn = $("btnCapturePhoto");
   if (photoBtn){
     photoBtn.addEventListener("click", () => captureUsageProof());
+  }
+
+  const backfillPortInput = $("backfillPortInput");
+  if (backfillPortInput){
+    backfillPortInput.addEventListener("change", async (e) => {
+      await handleBackfillPhotoUpload("port_test", e.target.files?.[0] || null);
+      e.target.value = "";
+    });
+  }
+  const backfillSpliceInput = $("backfillSpliceInput");
+  if (backfillSpliceInput){
+    backfillSpliceInput.addEventListener("change", async (e) => {
+      await handleBackfillPhotoUpload("splice_complete", e.target.files?.[0] || null);
+      e.target.value = "";
+    });
   }
 
   $("btnMarkNodeReady").addEventListener("click", () => markNodeReady());
