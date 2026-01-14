@@ -902,14 +902,14 @@ function renderLocations(){
       <div class="hr"></div>
       <div class="row" style="align-items:flex-end;">
         <div class="muted small">Terminal ports</div>
-        <select class="input" data-action="portsSelect" data-id="${r.id}" style="width:140px; flex:0 0 auto;">
+        <select class="input" data-action="portsSelect" data-id="${r.id}" style="width:140px; flex:0 0 auto;" ${billingLocked ? "disabled" : ""}>
           <option value="2" ${portValue === "2" ? "selected" : ""}>2</option>
           <option value="4" ${portValue === "4" ? "selected" : ""}>4</option>
           <option value="6" ${portValue === "6" ? "selected" : ""}>6</option>
           <option value="8" ${portValue === "8" ? "selected" : ""}>8</option>
           <option value="custom" ${portValue === "custom" ? "selected" : ""}>Custom</option>
         </select>
-        <input class="input" type="number" min="1" max="8" step="1" data-action="portsCustom" data-id="${r.id}" value="${customValue}" ${customStyle} style="width:120px; flex:0 0 auto;" />
+        <input class="input" type="number" min="1" max="8" step="1" data-action="portsCustom" data-id="${r.id}" value="${customValue}" ${customStyle} style="width:120px; flex:0 0 auto;" ${billingLocked ? "disabled" : ""} />
         <div class="muted small">Required = ports + 1 completion.</div>
       </div>
       <div class="hr"></div>
@@ -955,6 +955,15 @@ function renderLocations(){
   list.addEventListener("click", async (e) => {
     const btn = e.target.closest("button");
     const label = e.target.closest("[data-action='editName']");
+    const removeBtn = e.target.closest("[data-action='removeSlotPhoto']");
+    if (removeBtn){
+      e.preventDefault();
+      e.stopPropagation();
+      const locId = removeBtn.dataset.locationId;
+      const slotKey = removeBtn.dataset.slotKey;
+      await deleteSpliceSlotPhoto(locId, slotKey);
+      return;
+    }
     if (label){
       const loc = node.splice_locations.find(x => x.id === label.dataset.id);
       if (!loc) return;
@@ -1042,6 +1051,7 @@ function renderSpliceSlotCard(loc, slotKey, isRequired){
   const label = getSlotLabel(slotKey);
   const badge = isRequired ? "" : '<span class="slot-badge">Extra</span>';
   const timestamp = photo?.taken_at ? new Date(photo.taken_at).toLocaleString() : "";
+  const locked = isLocationBillingLocked(loc.id);
   const thumb = photo?.previewUrl
     ? `<img class="slot-thumb" src="${photo.previewUrl}" alt="${escapeHtml(label)} photo"/>`
     : photo
@@ -1063,6 +1073,11 @@ function renderSpliceSlotCard(loc, slotKey, isRequired){
       ${photo ? `
         ${thumb}
         <div class="slot-meta">${timestamp || "Timestamp pending"}</div>
+        ${locked ? "" : `
+          <div class="row" style="justify-content:flex-end; width:100%;">
+            <button type="button" class="btn ghost small" data-action="removeSlotPhoto" data-location-id="${loc.id}" data-slot-key="${slotKey}">Remove</button>
+          </div>
+        `}
       ` : placeholder}
     </label>
   `;
@@ -1073,12 +1088,17 @@ async function updateTerminalPorts(locationId, nextPorts){
   if (!node) return;
   const loc = node.splice_locations.find(x => x.id === locationId);
   if (!loc) return;
+  if (isLocationBillingLocked(loc.id)){
+    toast("Billing locked", "Terminal ports are locked after billing is ready.");
+    return;
+  }
   const normalized = normalizeTerminalPorts(nextPorts);
   if (normalized === loc.terminal_ports) return;
   if (isDemo){
     loc.terminal_ports = normalized;
     renderLocations();
     renderProofChecklist();
+    toast("Ports saved", `Terminal ports set to ${normalized}.`);
     return;
   }
   const { error } = await state.client
@@ -1092,6 +1112,7 @@ async function updateTerminalPorts(locationId, nextPorts){
   loc.terminal_ports = normalized;
   renderLocations();
   renderProofChecklist();
+  toast("Ports saved", `Terminal ports set to ${normalized}.`);
 }
 
 async function saveSpliceLocationName(locationId, nextName){
@@ -1145,6 +1166,10 @@ async function handleSpliceSlotPhotoUpload(locationId, slotKey, file){
   const loc = node.splice_locations.find(l => l.id === locationId);
   if (!loc){
     toast("Location missing", "Splice location not found.");
+    return;
+  }
+  if (isLocationBillingLocked(loc.id)){
+    toast("Billing locked", "Photos are locked after billing is ready.");
     return;
   }
   const takenAt = nowISO();
@@ -1202,6 +1227,52 @@ async function handleSpliceSlotPhotoUpload(locationId, slotKey, file){
     previewUrl,
   };
   await loadSplicePhotos(node.id, [loc]);
+  renderLocations();
+  renderProofChecklist();
+}
+
+async function deleteSpliceSlotPhoto(locationId, slotKey){
+  const node = state.activeNode;
+  if (!node) return;
+  const loc = node.splice_locations.find(l => l.id === locationId);
+  if (!loc) return;
+  if (isLocationBillingLocked(loc.id)){
+    toast("Billing locked", "Photos are locked after billing is ready.");
+    return;
+  }
+  const existing = loc.photosBySlot?.[slotKey];
+  if (!existing){
+    toast("No photo", "No photo found for this slot.");
+    return;
+  }
+  if (isDemo){
+    delete loc.photosBySlot[slotKey];
+    renderLocations();
+    renderProofChecklist();
+    return;
+  }
+
+  const path = existing.path || existing.photo_path;
+  if (path){
+    const { error: storageErr } = await state.client
+      .storage
+      .from("proof-photos")
+      .remove([path]);
+    if (storageErr){
+      toast("Remove failed", storageErr.message);
+    }
+  }
+
+  const { error } = await state.client
+    .from("splice_location_photos")
+    .delete()
+    .eq("splice_location_id", loc.id)
+    .eq("slot_key", slotKey);
+  if (error){
+    toast("Remove failed", error.message);
+    return;
+  }
+  delete loc.photosBySlot[slotKey];
   renderLocations();
   renderProofChecklist();
 }
