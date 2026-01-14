@@ -3164,10 +3164,16 @@ function wireUI(){
   $("btnSignUp").addEventListener("click", async () => {
     if (isDemo) return;
     const email = $("email").value.trim();
-    const password = $("password").value;
-    const { data, error } = await state.client.auth.signUp({ email, password });
-    if (error) toast("Sign-up failed", error.message);
-    else toast("Signed up", "Now assign a role in profiles (OWNER/PRIME/SUB/SPLICER/TDS).");
+    if (!email){
+      toast("Email needed", "Enter your email address first.");
+      return;
+    }
+    const { error } = await state.client.auth.signInWithOtp({
+      email,
+      options: { shouldCreateUser: true },
+    });
+    if (error) toast("Invite failed", error.message);
+    else toast("Invite sent", "Magic link sent. User is created on first login.");
   });
 
   const catalogSearch = $("catalogSearch");
