@@ -420,6 +420,15 @@ const state = {
     editorMarkerId: null,
     summaryOpen: false,
   },
+  masterLocationSearch: {
+    open: false,
+    loading: false,
+    term: "",
+    sites: [],
+    legacyNodes: [],
+    records: {},
+    unavailable: [],
+  },
   pinOverview: {
     open: false,
   },
@@ -536,6 +545,11 @@ function isEffectiveRootRole(){
   if (getRoleCode() === "ROOT") return true;
   const authoritativeRootCheck = SpecCom.helpers?.isRoot;
   return typeof authoritativeRootCheck === "function" && authoritativeRootCheck();
+}
+
+function canUseMasterLocationSearch(){
+  if (isBreakGlassUser()) return true;
+  return ["ROOT", "ADMIN"].includes(String(getRoleCode() || "").toUpperCase());
 }
 
 function isTechnician(x){
@@ -13625,6 +13639,8 @@ function setRoleBasedVisibility(){
     const el = $(id);
     if (el) el.style.display = fieldMode ? "none" : "";
   });
+  const masterSearchBtn = $("nav-master-search-btn");
+  if (masterSearchBtn) masterSearchBtn.style.display = canUseMasterLocationSearch() ? "" : "none";
   syncDemoFeatureHubVisibility();
   renderDemoShowcaseHome();
 
@@ -26000,6 +26016,290 @@ function renderFieldDayEndCard(){
   `;
 }
 
+function getMasterSearchProjectMap(){
+  return new Map((state.projects || []).map((project) => [String(project?.id || ""), project]));
+}
+
+function getMasterSearchProjectLabel(projectId){
+  const project = getMasterSearchProjectMap().get(String(projectId || ""));
+  return project?.name || project?.title || project?.job_number || `Project ${String(projectId || "").slice(0, 8)}`;
+}
+
+function formatMasterSearchDate(value){
+  if (!value) return "Unknown date";
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toLocaleString() : String(value);
+}
+
+function masterSearchText(value, fallback = "-"){
+  const text = String(value ?? "").trim();
+  return escapeHtml(text || fallback);
+}
+
+function masterSearchArrayText(value){
+  if (!value) return "-";
+  if (Array.isArray(value)) return value.length ? value.map((item) => typeof item === "string" ? item : JSON.stringify(item)).join(", ") : "-";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function getMasterSearchFileUrl(value, bucket = "proof-photos"){
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return "";
+  return getPublicStorageUrl(bucket, raw);
+}
+
+function renderMasterSearchSection(title, rows, renderRow, { open = false } = {}){
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return "";
+  return `
+    <details class="master-location-section" ${open ? "open" : ""}>
+      <summary>${escapeHtml(title)} (${list.length})</summary>
+      <div class="master-location-rows">${list.map(renderRow).join("")}</div>
+    </details>
+  `;
+}
+
+function getMasterSearchWorkerLabel(userId, profiles){
+  const profile = (profiles || []).find((row) => String(row?.id || "") === String(userId || ""));
+  return profile?.display_name || profile?.work_email || (userId ? `User ${String(userId).slice(0, 8)}` : "Unknown worker");
+}
+
+function renderMasterLocationSearchResults(){
+  const wrap = $("masterLocationSearchResults");
+  const status = $("masterLocationSearchStatus");
+  if (!wrap || !status) return;
+  const search = state.masterLocationSearch;
+  if (search.loading){
+    status.textContent = `Searching all accessible projects for “${search.term}”…`;
+    wrap.innerHTML = "";
+    return;
+  }
+  const records = search.records || {};
+  const sites = Array.isArray(search.sites) ? search.sites : [];
+  const legacyNodes = Array.isArray(search.legacyNodes) ? search.legacyNodes : [];
+  const unavailable = Array.isArray(search.unavailable) ? search.unavailable : [];
+  if (!search.term){
+    status.textContent = "Enter at least two characters.";
+    wrap.innerHTML = "";
+    return;
+  }
+  status.textContent = `${sites.length} saved-location match${sites.length === 1 ? "" : "es"}${legacyNodes.length ? ` and ${legacyNodes.length} legacy node match${legacyNodes.length === 1 ? "" : "es"}` : ""} across accessible projects.`;
+  const profiles = records.profiles || [];
+  const bySite = (rows, siteId, key = "site_id") => (rows || []).filter((row) => String(row?.[key] || "") === String(siteId || ""));
+  const cards = sites.map((site) => {
+    const siteId = String(site.id || "");
+    const projectId = String(site.project_id || "");
+    const workLogs = bySite(records.workLogs, siteId);
+    const events = bySite(records.fieldEvents, siteId);
+    const pings = bySite(records.locationPings, siteId);
+    const closeouts = bySite(records.closeouts, siteId, "base_location_id");
+    const media = bySite(records.siteMedia, siteId);
+    const codes = bySite(records.siteCodes, siteId);
+    const entries = bySite(records.siteEntries, siteId);
+    const redlines = (records.redlines || []).filter((row) => String(row?.site_id || row?.location_id || "") === siteId || String(row?.node_name || "").toLowerCase().includes(String(site.name || "").toLowerCase()));
+    const invoices = bySite(records.invoices, siteId);
+    const fieldPhotos = (records.fieldPhotos || []).filter((row) => String(row?.project_id || "") === projectId);
+    const projectFiles = (records.projectFiles || []).filter((row) => String(row?.project_id || "") === projectId);
+    const invoiceIds = new Set(invoices.map((row) => String(row.id || "")));
+    const invoiceItems = (records.invoiceItems || []).filter((row) => invoiceIds.has(String(row?.invoice_id || "")));
+    const activityCount = workLogs.length + events.length + closeouts.length;
+    const photoCount = media.length + fieldPhotos.length;
+    return `
+      <article class="master-location-result">
+        <div class="master-location-result-head">
+          <div>
+            <div class="master-location-result-title">${masterSearchText(site.name, "Unnamed location")}</div>
+            <div class="master-location-project">${masterSearchText(getMasterSearchProjectLabel(projectId))}</div>
+          </div>
+          <button class="btn ghost small" type="button" data-master-location-open="${escapeHtml(siteId)}" data-master-project-open="${escapeHtml(projectId)}">Open on Map</button>
+        </div>
+        <div class="master-location-meta">
+          <span class="chip">${activityCount} work record${activityCount === 1 ? "" : "s"}</span>
+          <span class="chip">${photoCount} photo${photoCount === 1 ? "" : "s"}</span>
+          <span class="chip">${redlines.length} redline${redlines.length === 1 ? "" : "s"}</span>
+          <span class="chip">${invoices.length} invoice${invoices.length === 1 ? "" : "s"}</span>
+        </div>
+        <div class="muted small" style="margin-top:7px;">GPS: ${masterSearchText(site.gps_lat ?? site.lat)}, ${masterSearchText(site.gps_lng ?? site.lng)} · Created ${masterSearchText(formatMasterSearchDate(site.created_at))}</div>
+        ${site.notes ? `<div class="master-location-row" style="margin-top:8px;"><strong>Location notes:</strong> ${masterSearchText(site.notes)}</div>` : ""}
+        ${renderMasterSearchSection("Field work and visits", [...workLogs, ...events].sort((a, b) => String(b.completed_at || b.ended_at || b.started_at || "").localeCompare(String(a.completed_at || a.ended_at || a.started_at || ""))), (row) => `
+          <div class="master-location-row"><strong>${masterSearchText(row.event_type || "Work log")}</strong> · ${masterSearchText(getMasterSearchWorkerLabel(row.user_id, profiles))} · ${masterSearchText(formatMasterSearchDate(row.completed_at || row.ended_at || row.started_at))}<br>
+          ${masterSearchText(row.work_completed || row.notes)}<br><span class="muted">Codes: ${masterSearchText(masterSearchArrayText(row.work_codes))} · Materials: ${masterSearchText(masterSearchArrayText(row.materials_used))} · Status: ${masterSearchText(row.status_after || row.status_before)}</span></div>
+        `, { open: true })}
+        ${renderMasterSearchSection("Closeout checklists", closeouts, (row) => `<div class="master-location-row"><strong>${masterSearchText(row.visit_label, "Location closeout")}</strong> · ${masterSearchText(getMasterSearchWorkerLabel(row.user_id, profiles))} · ${masterSearchText(formatMasterSearchDate(row.submitted_at))}<br>${masterSearchText(masterSearchArrayText(row.checklist))}</div>`)}
+        ${renderMasterSearchSection("Photos and files", [...media, ...fieldPhotos, ...projectFiles], (row) => {
+          const rawUrl = String(row.image_url || row.media_path || row.file_path || "").trim();
+          const url = getMasterSearchFileUrl(rawUrl, row.file_path ? "invoice-files" : "proof-photos");
+          return `<div class="master-location-row"><strong>${masterSearchText(row.proof_type || row.file_name || "Photo")}</strong> · ${masterSearchText(formatMasterSearchDate(row.created_at))}${url ? `<div class="master-location-links"><a href="${escapeHtml(url)}" target="_blank" rel="noopener">Open original</a><span class="muted">${masterSearchText(rawUrl)}</span></div>` : ""}</div>`;
+        })}
+        ${renderMasterSearchSection("Redlines", redlines, (row) => {
+          const photoUrl = getMasterSearchFileUrl(row.photo_url);
+          return `<div class="master-location-row"><strong>${masterSearchText(row.change_type, "Redline")}</strong> · ${masterSearchText(row.status)} · ${masterSearchText(formatMasterSearchDate(row.updated_at || row.created_at))}<br>Old: ${masterSearchText(row.old_value)} · New: ${masterSearchText(row.new_value)}<br>${masterSearchText(row.notes)}${photoUrl ? `<div class="master-location-links"><a href="${escapeHtml(photoUrl)}" target="_blank" rel="noopener">Open redline photo</a></div>` : ""}</div>`;
+        })}
+        ${renderMasterSearchSection("Invoices and production", invoices, (row) => {
+          const items = invoiceItems.filter((item) => String(item.invoice_id || "") === String(row.id || ""));
+          return `<div class="master-location-row"><strong>${masterSearchText(row.invoice_number, `Invoice ${String(row.id || "").slice(0, 8)}`)}</strong> · ${masterSearchText(row.status)} · ${masterSearchText(formatMasterSearchDate(row.created_at))}<br>Total: ${masterSearchText(row.total)} · Items: ${masterSearchText(masterSearchArrayText(items.map((item) => ({ code: item.code || item.description, qty: item.quantity ?? item.qty, amount: item.amount ?? item.total })) ))}</div>`;
+        })}
+        ${renderMasterSearchSection("Codes, quantities, and GPS history", [...codes, ...entries, ...pings], (row) => `<div class="master-location-row"><strong>${masterSearchText(row.code || row.description || row.source || "GPS ping")}</strong> · ${masterSearchText(formatMasterSearchDate(row.captured_at || row.created_at))}<br>${row.quantity != null ? `Quantity: ${masterSearchText(row.quantity)} · ` : ""}${row.gps_lat != null ? `GPS: ${masterSearchText(row.gps_lat)}, ${masterSearchText(row.gps_lng)} · ` : ""}${masterSearchText(row.nearest_distance_m != null ? `${row.nearest_distance_m}m from location` : "")}</div>`)}
+      </article>
+    `;
+  });
+  const legacyCards = legacyNodes.map((node) => {
+    const proofs = (records.legacyProofs || []).filter((row) => String(row?.node_id || "") === String(node.id || ""));
+    const invoices = (records.invoices || []).filter((row) => String(row?.node_id || "") === String(node.id || ""));
+    return `
+      <article class="master-location-result">
+        <div class="master-location-result-title">Legacy node ${masterSearchText(node.node_number)}</div>
+        <div class="master-location-project">${masterSearchText(getMasterSearchProjectLabel(node.project_id))}</div>
+        <div class="muted small" style="margin-top:7px;">Status: ${masterSearchText(node.status)} · ${masterSearchText(node.description)}</div>
+        ${renderMasterSearchSection("Legacy proof photos", proofs, (row) => {
+          const photoUrl = getMasterSearchFileUrl(row.photo_url);
+          return `<div class="master-location-row"><strong>${masterSearchText(row.photo_type, "Proof photo")}</strong> · ${masterSearchText(formatMasterSearchDate(row.captured_at || row.created_at))}${photoUrl ? `<div class="master-location-links"><a href="${escapeHtml(photoUrl)}" target="_blank" rel="noopener">Open original</a></div>` : ""}</div>`;
+        })}
+        ${renderMasterSearchSection("Legacy invoices", invoices, (row) => `<div class="master-location-row"><strong>${masterSearchText(row.invoice_number, "Invoice")}</strong> · ${masterSearchText(row.status)} · ${masterSearchText(formatMasterSearchDate(row.created_at))}<br>Total: ${masterSearchText(row.total)}</div>`)}
+      </article>
+    `;
+  });
+  const unavailableHtml = unavailable.length ? `<details class="master-location-result master-location-errors"><summary>Sources unavailable (${unavailable.length})</summary><div class="master-location-rows">${unavailable.map((item) => `<div class="master-location-row"><strong>${masterSearchText(item.source)}</strong>: ${masterSearchText(item.message)}</div>`).join("")}</div></details>` : "";
+  wrap.innerHTML = [...cards, ...legacyCards].join("") || `<div class="note">No saved locations matched “${escapeHtml(search.term)}”. Try the full network-point name or another number.</div>`;
+  wrap.insertAdjacentHTML("beforeend", unavailableHtml);
+}
+
+async function runMasterSearchSource(source, query){
+  try{
+    const { data, error } = await query;
+    if (error) throw error;
+    return { source, data: Array.isArray(data) ? data : [] };
+  } catch (error){
+    return { source, data: [], error };
+  }
+}
+
+async function searchMasterLocations(rawTerm){
+  if (!canUseMasterLocationSearch()){
+    toast("Not allowed", "Master location search is limited to ADMIN and ROOT roles.", "error");
+    return;
+  }
+  const term = String(rawTerm || "").trim();
+  if (term.length < 2){
+    toast("Search needed", "Enter at least two characters or digits.");
+    return;
+  }
+  if (!state.client){
+    toast("Search unavailable", "Connect to SpecCom before searching.", "error");
+    return;
+  }
+  const search = state.masterLocationSearch;
+  search.term = term;
+  search.loading = true;
+  search.sites = [];
+  search.legacyNodes = [];
+  search.records = {};
+  search.unavailable = [];
+  renderMasterLocationSearchResults();
+  const postgrestTerm = term.replace(/[,%()]/g, " ").replace(/\s+/g, " ").trim();
+  let siteResult = await runMasterSearchSource("saved locations", state.client
+    .from("sites")
+    .select("id, project_id, name, notes, gps_lat, gps_lng, gps_accuracy_m, lat, lng, created_at")
+    .or(`name.ilike.%${postgrestTerm}%,notes.ilike.%${postgrestTerm}%`)
+    .order("created_at", { ascending: false })
+    .limit(100));
+  if (siteResult.error && (isMissingGpsColumnError(siteResult.error) || isMissingLatLngColumnError(siteResult.error))){
+    siteResult = await runMasterSearchSource("saved locations", state.client
+      .from("sites")
+      .select("id, project_id, name, notes, created_at")
+      .or(`name.ilike.%${postgrestTerm}%,notes.ilike.%${postgrestTerm}%`)
+      .order("created_at", { ascending: false })
+      .limit(100));
+  }
+  const nodeResult = await runMasterSearchSource("legacy nodes", state.client
+    .from("nodes")
+    .select("id, project_id, node_number, description, status, started_at, completed_at, created_at")
+    .or(`node_number.ilike.%${postgrestTerm}%,description.ilike.%${postgrestTerm}%`)
+    .order("created_at", { ascending: false })
+    .limit(100));
+  search.sites = siteResult.data;
+  search.legacyNodes = nodeResult.data;
+  [siteResult, nodeResult].filter((result) => result.error).forEach((result) => search.unavailable.push({ source: result.source, message: result.error.message || "Query failed" }));
+  const siteIds = search.sites.map((row) => row.id).filter(Boolean);
+  const nodeIds = search.legacyNodes.map((row) => row.id).filter(Boolean);
+  const sourceQueries = [];
+  if (siteIds.length){
+    sourceQueries.push(
+      ["siteMedia", "Location photos", state.client.from("site_media").select("id, site_id, media_path, gps_lat, gps_lng, gps_accuracy_m, created_by, created_at, source, proof_type").in("site_id", siteIds).order("created_at", { ascending: false }).limit(1000)],
+      ["siteCodes", "Location codes", state.client.from("site_codes").select("id, site_id, code, created_by, created_at").in("site_id", siteIds).order("created_at", { ascending: false }).limit(1000)],
+      ["siteEntries", "Location quantities", state.client.from("site_entries").select("id, site_id, description, quantity, created_by, created_at").in("site_id", siteIds).order("created_at", { ascending: false }).limit(1000)],
+      ["workLogs", "Field work logs", state.client.from("field_work_logs").select("id, user_id, project_id, site_id, work_date, arrived_at, completed_at, gps_lat, gps_lng, nearest_distance_m, status_before, status_after, work_completed, work_codes, materials_used, created_at").in("site_id", siteIds).order("completed_at", { ascending: false }).limit(1000)],
+      ["locationPings", "GPS history", state.client.from("field_location_pings").select("id, user_id, project_id, site_id, work_date, captured_at, gps_lat, gps_lng, gps_accuracy_m, nearest_distance_m, source").in("site_id", siteIds).order("captured_at", { ascending: false }).limit(1000)],
+      ["fieldEvents", "Field-day visits", state.client.from("field_day_events").select("id, session_id, user_id, project_id, site_id, event_type, label, started_at, ended_at, duration_minutes, gps_lat, gps_lng, notes, work_codes, materials_used").in("site_id", siteIds).order("started_at", { ascending: false }).limit(1000)],
+      ["closeouts", "Closeout checklists", state.client.from("splicer_location_closeout_checklists").select("id, project_day_id, location_visit_id, project_id, user_id, base_location_id, visit_label, submitted_at, gps_lat, gps_lng, checklist").in("base_location_id", siteIds).order("submitted_at", { ascending: false }).limit(1000)],
+      ["invoices", "Invoices", state.client.from("invoices").select("id, invoice_number, project_id, site_id, status, subtotal, tax, total, created_at").in("site_id", siteIds).order("created_at", { ascending: false }).limit(1000)],
+      ["redlinesBySite", "Redlines by location", state.client.from("redline_markers").select("id, site_id, location_id, project_id, attached_node_id, node_name, change_type, title, old_value, new_value, notes, status, photo_url, created_by, created_at, updated_at").in("site_id", siteIds).order("created_at", { ascending: false }).limit(1000)]
+    );
+    sourceQueries.push(["redlinesByLocation", "Redlines by legacy location link", state.client.from("redline_markers").select("id, site_id, location_id, project_id, attached_node_id, node_name, change_type, title, old_value, new_value, notes, status, photo_url, created_by, created_at, updated_at").in("location_id", siteIds).order("created_at", { ascending: false }).limit(1000)]);
+  }
+  if (nodeIds.length){
+    sourceQueries.push(
+      ["legacyProofs", "Legacy proof photos", state.client.from("proof_uploads").select("id, node_id, splice_location_id, photo_url, lat, lng, captured_at, job_number, photo_type, captured_by, created_at").in("node_id", nodeIds).order("created_at", { ascending: false }).limit(1000)],
+      ["nodeInvoices", "Legacy node invoices", state.client.from("invoices").select("id, invoice_number, project_id, node_id, site_id, status, subtotal, tax, total, created_at").in("node_id", nodeIds).order("created_at", { ascending: false }).limit(1000)]
+    );
+  }
+  sourceQueries.push(
+    ["fieldPhotos", "Field photo archive", state.client.from("field_photos").select("id, project_id, file_name, mh_number, image_url, latitude, longitude, created_at").ilike("mh_number", `%${postgrestTerm}%`).order("created_at", { ascending: false }).limit(1000)],
+    ["projectFiles", "Uploaded project and invoice files", state.client.from("invoice_files").select("id, org_id, project_id, file_name, file_path, uploaded_by, created_at").or(`file_name.ilike.%${postgrestTerm}%,file_path.ilike.%${postgrestTerm}%`).order("created_at", { ascending: false }).limit(1000)],
+    ["redlinesByName", "Redlines by network-point name", state.client.from("redline_markers").select("id, site_id, location_id, project_id, attached_node_id, node_name, change_type, title, old_value, new_value, notes, status, photo_url, created_by, created_at, updated_at").or(`node_name.ilike.%${postgrestTerm}%,attached_node_id.ilike.%${postgrestTerm}%,notes.ilike.%${postgrestTerm}%`).order("created_at", { ascending: false }).limit(1000)]
+  );
+  const results = await Promise.all(sourceQueries.map(([key, label, query]) => runMasterSearchSource(label, query).then((result) => ({ ...result, key }))));
+  results.forEach((result) => {
+    search.records[result.key] = result.data;
+    if (result.error) search.unavailable.push({ source: result.source, message: result.error.message || "Query failed" });
+  });
+  const redlineMap = new Map([...(search.records.redlinesBySite || []), ...(search.records.redlinesByLocation || []), ...(search.records.redlinesByName || [])].map((row, index) => [String(row.id || index), row]));
+  search.records.redlines = Array.from(redlineMap.values());
+  const invoiceMap = new Map([...(search.records.invoices || []), ...(search.records.nodeInvoices || [])].map((row, index) => [String(row.id || index), row]));
+  search.records.invoices = Array.from(invoiceMap.values());
+  const invoiceIds = (search.records.invoices || []).map((row) => row.id).filter(Boolean);
+  if (invoiceIds.length){
+    const invoiceItems = await runMasterSearchSource("Invoice line items", state.client.from("invoice_items").select("id, invoice_id, description, unit, qty, rate, amount, created_at").in("invoice_id", invoiceIds).limit(2000));
+    search.records.invoiceItems = invoiceItems.data;
+    if (invoiceItems.error) search.unavailable.push({ source: invoiceItems.source, message: invoiceItems.error.message || "Query failed" });
+  }
+  const userIds = Array.from(new Set([...(search.records.workLogs || []), ...(search.records.fieldEvents || []), ...(search.records.closeouts || [])].map((row) => row.user_id).filter(Boolean)));
+  if (userIds.length){
+    const profileResult = await runMasterSearchSource("Worker profiles", state.client.from("profiles").select("id, display_name, work_email").in("id", userIds));
+    search.records.profiles = profileResult.data;
+    if (profileResult.error) search.unavailable.push({ source: profileResult.source, message: profileResult.error.message || "Query failed" });
+  }
+  search.loading = false;
+  renderMasterLocationSearchResults();
+}
+
+function openMasterLocationSearch(initialTerm = ""){
+  if (!canUseMasterLocationSearch()){
+    toast("Not allowed", "Master location search is limited to ADMIN and ROOT roles.", "error");
+    return;
+  }
+  const modal = $("masterLocationSearchModal");
+  if (!modal) return;
+  state.masterLocationSearch.open = true;
+  modal.style.display = "flex";
+  const input = $("masterLocationSearchInput");
+  if (input){
+    input.value = String(initialTerm || state.masterLocationSearch.term || "");
+    setTimeout(() => input.focus(), 0);
+  }
+  renderMasterLocationSearchResults();
+  if (String(initialTerm || "").trim().length >= 2) void searchMasterLocations(initialTerm);
+}
+
+function closeMasterLocationSearch(){
+  state.masterLocationSearch.open = false;
+  const modal = $("masterLocationSearchModal");
+  if (modal) modal.style.display = "none";
+}
+
 function renderRootMapAdminControls(){
   const projectName = state.activeProject?.name || "No project selected";
   return `
@@ -26007,6 +26307,10 @@ function renderRootMapAdminControls(){
       <div class="map-field-card-kicker">ROOT Map Administration</div>
       <div id="mapRootAdminTitle" class="map-root-admin-title">${escapeHtml(projectName)}</div>
       <div class="muted small">Manage map data, users, projects, reporting, and billing.</div>
+      <div class="map-field-search-row">
+        <input id="mapRootMasterSearch" class="input compact" type="search" placeholder="Master search: 1702" aria-label="Master location search" />
+        <button class="btn secondary small" type="button" data-map-field-action="rootMasterSearch">Search All</button>
+      </div>
       <div class="map-root-admin-grid">
         <button class="btn secondary small" type="button" data-map-field-action="rootOpenView" data-root-view="viewAdmin">Administration</button>
         <button class="btn secondary small" type="button" data-map-field-action="rootOpenProjects">Projects</button>
@@ -37548,6 +37852,45 @@ function wireUI(){
       window.location.hash = "#redline";
     });
   }
+  const navMasterSearchBtn = $("nav-master-search-btn");
+  if (navMasterSearchBtn){
+    navMasterSearchBtn.addEventListener("click", () => openMasterLocationSearch());
+  }
+  const masterLocationSearchForm = $("masterLocationSearchForm");
+  if (masterLocationSearchForm){
+    masterLocationSearchForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void searchMasterLocations($("masterLocationSearchInput")?.value || "");
+    });
+  }
+  ["btnMasterLocationSearchClose"].forEach((id) => {
+    $(id)?.addEventListener("click", closeMasterLocationSearch);
+  });
+  const masterLocationSearchModal = $("masterLocationSearchModal");
+  if (masterLocationSearchModal){
+    masterLocationSearchModal.addEventListener("click", async (event) => {
+      if (event.target === masterLocationSearchModal){
+        closeMasterLocationSearch();
+        return;
+      }
+      const openBtn = event.target.closest("[data-master-location-open]");
+      if (!openBtn) return;
+      const projectId = String(openBtn.dataset.masterProjectOpen || "");
+      const siteId = String(openBtn.dataset.masterLocationOpen || "");
+      if (!projectId || !siteId) return;
+      setActiveProjectById(projectId);
+      if (String(state.activeProject?.id || "") !== projectId){
+        toast("Project unavailable", "That project is not available in the current account context.", "error");
+        return;
+      }
+      closeMasterLocationSearch();
+      setActiveView("viewMap");
+      await loadProjectSites(projectId);
+      setMapFieldSelectedSite(siteId);
+      focusSiteOnMap(siteId);
+      await openSitePopupForSiteId(siteId, { center: true, syncSelection: true });
+    });
+  }
   const navSpliceBtn = $("nav-splice-btn");
   if (navSpliceBtn){
     navSpliceBtn.addEventListener("click", () => {
@@ -38480,6 +38823,10 @@ function wireUI(){
           if (isEffectiveRootRole()) openProjectsModal();
           return;
         }
+        if (action === "rootMasterSearch"){
+          if (canUseMasterLocationSearch()) openMasterLocationSearch($("mapRootMasterSearch")?.value || "");
+          return;
+        }
         if (action === "rootCreateLocation"){
           if (!isEffectiveRootRole()) return;
           if (!state.activeProject?.id){
@@ -38652,6 +38999,11 @@ function wireUI(){
       const pressedBtn = e.target.closest("button");
       setButtonBusy(pressedBtn, true);
       handleMapFieldPanelClick(e).finally(() => setButtonBusy(pressedBtn, false));
+    });
+    mapFieldPanel.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.target?.id !== "mapRootMasterSearch") return;
+      e.preventDefault();
+      openMasterLocationSearch(e.target.value || "");
     });
     mapFieldPanel.addEventListener("change", (e) => {
       const select = e.target.closest("#mapFieldStatusSelect");

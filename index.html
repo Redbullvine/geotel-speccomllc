@@ -2145,6 +2145,13 @@
           <circle cx="14" cy="4" r="1.5" fill="currentColor" stroke="none"/>
         </svg>
       </button>
+      <button class="nav-util" id="nav-master-search-btn" title="Master location search" type="button" style="display:none;">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="7" cy="7" r="4.5"/>
+          <line x1="10.5" y1="10.5" x2="14" y2="14"/>
+          <path d="M4.5 7h5M7 4.5v5"/>
+        </svg>
+      </button>
       <button class="nav-util" id="nav-splice-btn" title="Add Splice" type="button">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
           <circle cx="8" cy="8" r="6"/>
@@ -3689,6 +3696,24 @@
           <button id="btnGrantAccessCancel" class="btn ghost" type="button">Cancel</button>
           <button id="btnGrantAccessConfirm" class="btn" type="button">Grant Access</button>
         </div>
+      </div>
+    </div>
+
+    <div id="masterLocationSearchModal" class="modal" style="display:none;">
+      <div class="card modal-card master-location-search-modal" role="dialog" aria-modal="true" aria-labelledby="masterLocationSearchTitle">
+        <div class="modal-header">
+          <div>
+            <h2 id="masterLocationSearchTitle">Master Location Search</h2>
+            <div class="muted small">Search every accessible project for a location or network-point number.</div>
+          </div>
+          <button id="btnMasterLocationSearchClose" class="btn ghost small" type="button">Close</button>
+        </div>
+        <form id="masterLocationSearchForm" class="master-location-search-form" autocomplete="off">
+          <input id="masterLocationSearchInput" class="input" type="search" placeholder="Example: 1702 or RuidosoNetworkPoint-1702" aria-label="Location or network-point number" />
+          <button id="btnMasterLocationSearchRun" class="btn secondary" type="submit">Search All Projects</button>
+        </form>
+        <div id="masterLocationSearchStatus" class="muted small" aria-live="polite">Enter at least two characters.</div>
+        <div id="masterLocationSearchResults" class="master-location-search-results"></div>
       </div>
     </div>
 
