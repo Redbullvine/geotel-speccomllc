@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "build": "node --check app.js && node --check services/dailyReportTime.mjs && node --check services/fieldVisitEvidence.mjs",
+    "build": "node --check app.js && node --check services/dailyReportTime.mjs && node --check services/fieldVisitEvidence.mjs && node --check services/node54Diagnostics.mjs",
     "process:timbond": "node C:\\SpecCom\\process_tim_bond_attachments.mjs"
   },
   "dependencies": {
