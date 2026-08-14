@@ -3669,6 +3669,14 @@ body.map-create-open .map-floating-places{
   border-radius:12px;
   background:rgba(22,101,52,.08);
 }
+.dpr-project-search-panel{
+  margin-top:12px;
+  border-color:rgba(59,130,246,.38);
+  background:rgba(37,99,235,.08);
+}
+.dpr-single-day-editor{
+  padding-top:4px;
+}
 .dpr-user-search-panel h2,
 .dpr-project-report-heading h2{
   margin:0 0 4px;

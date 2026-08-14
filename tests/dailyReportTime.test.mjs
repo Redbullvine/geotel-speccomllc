@@ -5,6 +5,7 @@ import {
   calculateWorkedTime,
   getSpecComDateKey,
   getSpecComDayBounds,
+  getDateKeysInRange,
   REPORT_TIME_STATUS,
 } from "../services/dailyReportTime.mjs";
 
@@ -35,6 +36,11 @@ test("active-day detection uses the SpecCom date near a UTC boundary", () => {
   });
   assert.equal(result.status, REPORT_TIME_STATUS.ACTIVE);
   assert.equal(result.minutes, 60);
+});
+
+test("project report range enumerates inclusive calendar dates", () => {
+  assert.deepEqual(getDateKeysInRange("2026-07-01", "2026-07-03"), ["2026-07-01", "2026-07-02", "2026-07-03"]);
+  assert.deepEqual(getDateKeysInRange("2026-07-03", "2026-07-01"), []);
 });
 
 test("completed historical session uses its timestamps", () => {

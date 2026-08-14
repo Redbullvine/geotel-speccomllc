@@ -69,6 +69,18 @@ export function getSpecComDayBounds(dateKey){
   return { start: new Date(startMs).toISOString(), endExclusive: new Date(endMs).toISOString() };
 }
 
+export function getDateKeysInRange(dateFrom, dateTo, maxDays = 93){
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom || "") || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo || "") || dateFrom > dateTo) return [];
+  const dates = [];
+  const cursor = new Date(`${dateFrom}T12:00:00Z`);
+  const end = new Date(`${dateTo}T12:00:00Z`);
+  while (cursor <= end && dates.length < maxDays){
+    dates.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
+}
+
 function invalidResult(status){
   return {
     status,

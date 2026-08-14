@@ -3271,6 +3271,40 @@
         <section id="viewDailyReport" class="view">
           <div class="card">
             <h1 data-i18n="dailyReportTitle">Daily Report</h1>
+            <section class="dpr-user-search-panel dpr-project-search-panel" aria-labelledby="dprProjectSearchTitle">
+              <div>
+                <h2 id="dprProjectSearchTitle">Project report search</h2>
+                <div class="muted small">Search one project across a From/Through date range.</div>
+              </div>
+              <div class="dpr-user-search-controls">
+                <div class="field-stack dpr-user-field">
+                  <label class="muted small" data-i18n="dprProjectLabel" for="dprProjectSelect">Project</label>
+                  <select id="dprProjectSelect" class="input">
+                    <option value="" data-i18n="selectProject">Select project</option>
+                  </select>
+                </div>
+                <div class="field-stack">
+                  <label class="muted small" for="dprDateFrom">From</label>
+                  <input id="dprDateFrom" class="input" type="date" />
+                </div>
+                <div class="field-stack">
+                  <label class="muted small" for="dprDateTo">Through</label>
+                  <input id="dprDateTo" class="input" type="date" />
+                </div>
+                <button id="btnDprRefresh" class="btn secondary" type="button">Search / Refresh</button>
+              </div>
+              <div id="dprMetrics" class="dpr-metrics"></div>
+              <div class="field-stack dpr-single-day-editor">
+                <div id="dprRangeNote" class="muted small"></div>
+                <label class="muted small" data-i18n="dprCommentsLabel">Comments / Needs Addressed</label>
+                <textarea id="dprComments" class="input" rows="4" data-i18n-placeholder="dprCommentsPlaceholder" placeholder="Anything needs addressed?"></textarea>
+                <div class="row">
+                  <button id="btnDprGenerate" class="btn secondary" type="button">Generate selected day</button>
+                  <button id="btnDprSave" class="btn" type="button" data-i18n="saveLabel">Save</button>
+                </div>
+                <div id="dprNote" class="muted small"></div>
+              </div>
+            </section>
             <section class="dpr-user-search-panel" aria-labelledby="dprUserSearchTitle">
               <div>
                 <h2 id="dprUserSearchTitle">User activity</h2>
@@ -3298,28 +3332,6 @@
                 <div class="muted small">Choose a user and date range to see their daily activity.</div>
               </div>
             </section>
-            <div class="dpr-project-report-heading">
-              <h2>Project daily report</h2>
-              <div class="muted small">Generate and save the report for one project and date.</div>
-            </div>
-            <div class="field-stack">
-              <label class="muted small" data-i18n="dprProjectLabel">Project</label>
-              <select id="dprProjectSelect" class="input">
-                <option value="" data-i18n="selectProject">Select project</option>
-              </select>
-              <label class="muted small" data-i18n="dprDateLabel">Report date</label>
-              <input id="dprDate" class="input" type="date" />
-              <div class="row">
-                <button id="btnDprRefresh" class="btn secondary" type="button" data-i18n="dprRefresh">Generate / Refresh</button>
-              </div>
-              <div id="dprMetrics" class="dpr-metrics"></div>
-              <label class="muted small" data-i18n="dprCommentsLabel">Comments / Needs Addressed</label>
-              <textarea id="dprComments" class="input" rows="4" data-i18n-placeholder="dprCommentsPlaceholder" placeholder="Anything needs addressed?"></textarea>
-              <div class="row">
-                <button id="btnDprSave" class="btn" type="button" data-i18n="saveLabel">Save</button>
-              </div>
-              <div id="dprNote" class="muted small"></div>
-            </div>
           </div>
         </section>
       </main>

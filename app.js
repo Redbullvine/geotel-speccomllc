@@ -10,12 +10,20 @@ import { offlinePhotoQueue } from "./services/offlinePhotoQueue.js";
 import {
   assessReportDuration,
   calculateWorkedTime,
+  getDateKeysInRange,
   getSpecComDateKey,
   getSpecComDayBounds,
   makeReportTimeWarning,
   REPORT_TIME_STATUS,
   SPECCOM_TIME_ZONE,
 } from "./services/dailyReportTime.mjs";
+import {
+  canSwitchFieldProject,
+  collectBillingCodes,
+  collectMaterials,
+  getRequiredFieldEvidenceMissing,
+  isProjectContextCurrent,
+} from "./services/fieldVisitEvidence.mjs";
 
 const isDebug = new URLSearchParams(location.search).has("debug");
 const dlog = (...args) => { if (isDebug) console.log(...args); };
@@ -277,6 +285,8 @@ const state = {
     reportId: null,
     projectId: null,
     reportDate: null,
+    reportDateFrom: null,
+    reportDateTo: null,
     metrics: null,
     summary: "",
     users: [],
@@ -291,6 +301,7 @@ const state = {
     events: [],
     activeEvent: null,
     loading: false,
+    loadingProjectId: null,
   },
   adminProfiles: [],
   materialAdminRows: [],
@@ -6345,15 +6356,16 @@ function buildSiteMarkerPopupHtml(site, {
       <div class="scSitePopup-actions">
         ${deleteButtonHtml}
       </div>
-      <div class="scSitePopup-edit-head">Notes</div>
+      <div class="scSitePopup-edit-head">Location Reference Notes</div>
       <div class="scSitePopup-edit-grid">
         <label class="scSitePopup-field is-full">
-          <span>Notes</span>
-          <textarea rows="4" data-popup-field="notes" ${canEditVerification ? "" : "readonly"} placeholder="Field notes, proof details, access notes...">${escapeHtml(notesRaw)}</textarea>
+          <span>Imported / office reference notes</span>
+          <textarea rows="4" data-popup-field="notes" ${canEditVerification ? "" : "readonly"} placeholder="Imported quantities, access details, and office reference notes...">${escapeHtml(notesRaw)}</textarea>
         </label>
+        <div class="muted tiny">These reference notes do not count as the worker's required notes for today's location visit.</div>
       </div>
       <div class="scSitePopup-actions">
-        <button type="button" class="scSitePopup-action" data-popup-action="save" data-popup-site-id="${escapeHtml(siteId)}">Save Codes + Notes</button>
+        <button type="button" class="scSitePopup-action" data-popup-action="save" data-popup-site-id="${escapeHtml(siteId)}">Save Codes + Reference Notes</button>
       </div>
       <div class="scSitePopup-photo-head">Photos</div>
       ${photosHtml}
@@ -18705,7 +18717,7 @@ async function loadTechnicianTimesheet(){
     return;
   }
   if (isDemo){
-    const workDate = getLocalDateISO();
+    const workDate = getSpecComDateKey();
     const userId = state.user?.id || "demo-bootstrap-user";
     const rows = Array.isArray(state.demo.timesheets) ? state.demo.timesheets : [];
     const match = rows
@@ -18723,7 +18735,7 @@ async function loadTechnicianTimesheet(){
     renderTechnicianDashboard();
     return;
   }
-  const workDate = getLocalDateISO();
+  const workDate = getSpecComDateKey();
   const { data, error } = await state.client
     .from("technician_timesheets")
     .select("id, user_id, project_id, work_date, clock_in_at, clock_out_at, total_minutes_worked, created_at")
@@ -18817,7 +18829,7 @@ async function startTechnicianTimesheet(){
   }
   if (isDemo){
     const now = nowISO();
-    const workDate = getLocalDateISO();
+    const workDate = getSpecComDateKey();
     const userId = state.user?.id || "demo-bootstrap-user";
     state.demo.timesheets = Array.isArray(state.demo.timesheets) ? state.demo.timesheets : [];
     const existing = state.demo.timesheets.find((row) => row.user_id === userId && row.work_date === workDate && !row.clock_out_at);
@@ -18994,7 +19006,7 @@ async function endTechnicianTimesheet(){
   renderTechnicianDashboard();
   await autoSaveDailyProgressReport({
     projectId: state.technician.timesheet?.project_id || data?.project_id || state.activeProject?.id || null,
-    reportDate: state.technician.timesheet?.work_date || data?.work_date || getLocalDateISO(),
+    reportDate: state.technician.timesheet?.work_date || data?.work_date || getSpecComDateKey(),
     silent: false,
   });
 }
@@ -19096,7 +19108,7 @@ async function loadLaborSnapshotForDashboard(){
     return;
   }
 
-  const workDate = getLocalDateISO();
+  const workDate = getSpecComDateKey();
   const { data, error } = await state.client
     .from("technician_timesheets")
     .select("id, user_id, work_date, total_minutes_worked, clock_in_at, clock_out_at, created_at")
@@ -20242,20 +20254,17 @@ function renderProjectsList(){
     const selectBtn = row.querySelector("[data-project-open]");
     if (selectBtn){
       selectBtn.addEventListener("click", () => {
-        setActiveProjectById(project.id);
-        closeProjectsModal();
+        if (setActiveProjectById(project.id)) closeProjectsModal();
       });
     }
     const deleteBtn = row.querySelector("[data-project-delete]");
     if (deleteBtn){
       deleteBtn.addEventListener("click", () => {
-        setActiveProjectById(project.id);
-        openDeleteProjectModal();
+        if (setActiveProjectById(project.id)) openDeleteProjectModal();
       });
     }
     row.addEventListener("dblclick", () => {
-      setActiveProjectById(project.id);
-      closeProjectsModal();
+      if (setActiveProjectById(project.id)) closeProjectsModal();
     });
     list.appendChild(row);
   });
@@ -21794,7 +21803,7 @@ function renderDprCodeChips(codes){
 
 function renderDprPhotos(photos, bucket = "proof-photos"){
   const list = Array.isArray(photos) ? photos : [];
-  if (!list.length) return `<span class="muted tiny">No photos captured on this report date</span>`;
+  if (!list.length) return `<span class="muted tiny">No photos captured in the selected reporting period</span>`;
   return list.slice(0, 8).map((photo, index) => {
     const path = String(photo?.path || photo?.photo_path || photo?.media_path || "").trim();
     const url = getPublicStorageUrl(bucket, path);
@@ -22043,7 +22052,7 @@ function renderDprFieldDayTimeline(sessions, events, closeouts = []){
             `;
           }).join("")}
         </div>
-      ` : `<div class="muted small">No field-day events captured for this date.</div>`}
+      ` : `<div class="muted small">No field-day events captured in the selected reporting period.</div>`}
     </div>
   `;
 }
@@ -22063,36 +22072,41 @@ function normalizeDprMaterialRows(rows){
     }));
 }
 
-async function loadFieldWorkReportRows(projectId, reportDate){
+async function loadFieldWorkReportRows(projectId, reportDate, reportDateTo = reportDate){
   if (isDemo || !state.client || !projectId || !reportDate){
     return { logs: [], pings: [], timesheets: [], sessions: [], events: [], closeouts: [] };
   }
-  const { start: reportStart, endExclusive: reportEnd } = getSpecComDayBounds(reportDate);
+  const { start: reportStart } = getSpecComDayBounds(reportDate);
+  const { endExclusive: reportEnd } = getSpecComDayBounds(reportDateTo);
   const [logsRes, pingsRes, timesheetsRes] = await Promise.all([
     state.client
       .from("field_work_logs")
       .select("id, user_id, project_id, site_id, work_date, arrived_at, completed_at, gps_lat, gps_lng, gps_accuracy_m, nearest_distance_m, status_before, status_after, work_completed, work_codes, materials_used, created_at")
       .eq("project_id", projectId)
-      .eq("work_date", reportDate)
+      .gte("work_date", reportDate)
+      .lte("work_date", reportDateTo)
       .order("completed_at", { ascending: true }),
     state.client
       .from("field_location_pings")
       .select("id, user_id, project_id, site_id, work_date, captured_at, gps_lat, gps_lng, gps_accuracy_m, nearest_distance_m, source")
       .eq("project_id", projectId)
-      .eq("work_date", reportDate)
+      .gte("work_date", reportDate)
+      .lte("work_date", reportDateTo)
       .order("captured_at", { ascending: true }),
     state.client
       .from("technician_timesheets")
       .select("id, user_id, project_id, work_date, clock_in_at, clock_out_at, total_minutes_worked")
       .eq("project_id", projectId)
-      .eq("work_date", reportDate)
+      .gte("work_date", reportDate)
+      .lte("work_date", reportDateTo)
       .order("clock_in_at", { ascending: true }),
   ]);
   const sessionsRes = await state.client
     .from("field_day_sessions")
     .select("id, user_id, project_id, work_date, started_at, ended_at, total_minutes, start_gps_lat, start_gps_lng, start_gps_accuracy_m, end_gps_lat, end_gps_lng, end_gps_accuracy_m, notes, created_at")
     .eq("project_id", projectId)
-    .eq("work_date", reportDate)
+    .gte("work_date", reportDate)
+    .lte("work_date", reportDateTo)
     .order("started_at", { ascending: true });
   const sessionIds = sessionsRes.error ? [] : (sessionsRes.data || []).map((row) => row.id).filter(Boolean);
   let eventsRes = { data: [], error: null };
@@ -22173,9 +22187,9 @@ function buildDprSummary(metrics){
   return locationNames ? `${summary} Locations: ${locationNames}.` : summary;
 }
 
-async function enhanceDprMetricsWithFieldWork(baseMetrics, projectId, reportDate, { persist = false, reportId = null } = {}){
+async function enhanceDprMetricsWithFieldWork(baseMetrics, projectId, reportDate, { reportDateTo = reportDate, persist = false, reportId = null } = {}){
   const metrics = { ...getDprDefaultMetrics(), ...(baseMetrics || {}) };
-  const { logs, pings, timesheets, sessions, events, closeouts } = await loadFieldWorkReportRows(projectId, reportDate);
+  const { logs, pings, timesheets, sessions, events, closeouts } = await loadFieldWorkReportRows(projectId, reportDate, reportDateTo);
   const normalizedCloseouts = closeouts.map(normalizeDprCloseoutPayload).filter(Boolean);
   const siteIds = Array.from(new Set([
     ...logs.map((row) => row.site_id),
@@ -22293,13 +22307,20 @@ async function enhanceDprMetricsWithFieldWork(baseMetrics, projectId, reportDate
     if (loc.gps_lng == null && visit.gps_lng != null) loc.gps_lng = visit.gps_lng;
   });
 
-  const fieldMaterials = logs.flatMap((log) => (
-    normalizeDprMaterialRows(log.materials_used).map((row) => ({
+  // Location events and work logs persist the same visit evidence. Prefer the
+  // event copy when both exist so a material does not appear twice in totals.
+  const eventMaterialGroupKeys = new Set(events
+    .filter((event) => normalizeDprMaterialRows(event.materials_used).length)
+    .map((event) => `${event.user_id || ""}|${toSiteIdKey(event.site_id)}|${getDprActivityDate(event.started_at)}`));
+  const fieldMaterials = logs.flatMap((log) => {
+    const groupKey = `${log.user_id || ""}|${toSiteIdKey(log.site_id)}|${log.work_date || getDprActivityDate(log.completed_at)}`;
+    if (eventMaterialGroupKeys.has(groupKey)) return [];
+    return normalizeDprMaterialRows(log.materials_used).map((row) => ({
       ...row,
       feature_id: row.feature_id || (siteMap.get(toSiteIdKey(log.site_id)) ? getSiteDisplayName(siteMap.get(toSiteIdKey(log.site_id))) : ""),
       used_at: log.completed_at || log.created_at || "",
-    }))
-  ));
+    }));
+  });
   const eventMaterials = events.flatMap((event) => (
     normalizeDprMaterialRows(event.materials_used).map((row) => ({
       ...row,
@@ -22314,7 +22335,10 @@ async function enhanceDprMetricsWithFieldWork(baseMetrics, projectId, reportDate
   getDprArray(metrics, "splice_locations_worked").forEach((loc) => (Array.isArray(loc.work_codes) ? loc.work_codes : []).forEach((code) => codeSet.add(String(code).trim().toLowerCase())));
   events.forEach((event) => (Array.isArray(event.work_codes) ? event.work_codes : []).forEach((code) => codeSet.add(String(code).trim().toLowerCase())));
   const normalizedSessions = sessions.map(normalizeFieldDaySessionRow).filter(Boolean);
-  const normalizedEvents = events.map(normalizeFieldDayEventRow).filter(Boolean);
+  const normalizedEvents = events.map(normalizeFieldDayEventRow).filter(Boolean).map((event) => ({
+    ...event,
+    work_date: getDprActivityDate(event.started_at),
+  }));
   const visitNotesForCounts = normalizedEvents.length
     ? normalizedEvents.map((event) => event.notes || "")
     : logs.map((log) => log.work_completed || "");
@@ -22330,7 +22354,7 @@ async function enhanceDprMetricsWithFieldWork(baseMetrics, projectId, reportDate
     }));
   const eventAssessments = normalizedEvents.map((event) => ({
     event,
-    assessment: assessDprDuration(event, reportDate),
+    assessment: assessDprDuration(event, event.work_date || reportDate),
   }));
   const minutesByType = eventAssessments.reduce((map, { event, assessment }) => {
     if (assessment.included) map[event.event_type] = (map[event.event_type] || 0) + assessment.minutes;
@@ -22340,28 +22364,33 @@ async function enhanceDprMetricsWithFieldWork(baseMetrics, projectId, reportDate
     .filter(({ event, assessment }) => [FIELD_DAY_EVENT_TYPES.BREAK_15, FIELD_DAY_EVENT_TYPES.LUNCH].includes(event.event_type)
       && assessment.status === REPORT_TIME_STATUS.VALID)
     .map(({ event }) => event);
-  const usesProjectDays = normalizedSessions.length > 0;
-  const authoritativeRows = usesProjectDays ? normalizedSessions : timesheets;
-  const startKey = usesProjectDays ? "started_at" : "clock_in_at";
-  const endKey = usesProjectDays ? "ended_at" : "clock_out_at";
-  const rowsByWorker = new Map();
-  authoritativeRows.forEach((row) => {
-    const workerId = String(row?.user_id || "unknown");
-    if (!rowsByWorker.has(workerId)) rowsByWorker.set(workerId, []);
-    rowsByWorker.get(workerId).push(row);
-  });
   const baseCrewById = new Map(getDprArray(metrics, "crew").map((row) => [String(row?.user_id || ""), row]));
-  const crew = [];
+  const workGroups = new Map();
+  const ensureWorkGroup = (workerId, workDate) => {
+    const key = `${workerId}|${workDate}`;
+    if (!workGroups.has(key)) workGroups.set(key, { workerId, workDate, sessions: [], timesheets: [] });
+    return workGroups.get(key);
+  };
+  normalizedSessions.forEach((row) => ensureWorkGroup(String(row?.user_id || "unknown"), row.work_date || getDprActivityDate(row.started_at)).sessions.push(row));
+  timesheets.forEach((row) => ensureWorkGroup(String(row?.user_id || "unknown"), row.work_date || getDprActivityDate(row.clock_in_at)).timesheets.push(row));
+  const crewByWorker = new Map();
   const timeWarnings = [];
   let projectDayMinutes = 0;
-  rowsByWorker.forEach((workerRows, workerId) => {
-    const workerSessionIds = new Set(workerRows.map((row) => row?.id).filter(Boolean));
+  workGroups.forEach((group) => {
+    const workerId = group.workerId;
+    const usesProjectDays = group.sessions.length > 0;
+    const authoritativeRows = usesProjectDays ? group.sessions : group.timesheets;
+    const startKey = usesProjectDays ? "started_at" : "clock_in_at";
+    const endKey = usesProjectDays ? "ended_at" : "clock_out_at";
+    const workerSessionIds = new Set(group.sessions.map((row) => row?.id).filter(Boolean));
     const workerEvents = usesProjectDays
-      ? completedBreakEvents.filter((event) => String(event?.user_id || "unknown") === workerId
-        || (event?.session_id && workerSessionIds.has(event.session_id)))
+      ? completedBreakEvents.filter((event) => (
+        (String(event?.user_id || "unknown") === workerId && event.work_date === group.workDate)
+        || (event?.session_id && workerSessionIds.has(event.session_id))
+      ))
       : [];
-    const result = calculateWorkedTime(workerRows, workerEvents, {
-      workDate: reportDate,
+    const result = calculateWorkedTime(authoritativeRows, workerEvents, {
+      workDate: group.workDate,
       startKey,
       endKey,
       source: usesProjectDays ? "Project Day" : "Timesheet",
@@ -22369,16 +22398,22 @@ async function enhanceDprMetricsWithFieldWork(baseMetrics, projectId, reportDate
     projectDayMinutes += result.minutes;
     timeWarnings.push(...result.warnings);
     const baseCrew = baseCrewById.get(workerId) || {};
-    crew.push({
+    const crewRow = crewByWorker.get(workerId) || {
       user_id: workerId === "unknown" ? "" : workerId,
       name: baseCrew.name || (workerId === state.user?.id ? (state.profile?.display_name || state.user?.email || "Field crew") : `Crew ${workerId.slice(0, 8)}`),
-      clock_in_at: workerRows[0]?.[startKey] || "",
-      clock_out_at: workerRows.map((row) => row?.[endKey]).filter(Boolean).at(-1) || "",
-      total_minutes_worked: result.minutes,
-      time_status: result.sessionAssessments.some(({ assessment }) => assessment.active) ? REPORT_TIME_STATUS.ACTIVE : "",
-      time_label: result.sessionAssessments.find(({ assessment }) => !assessment.included)?.assessment.label || "",
-    });
+      clock_in_at: authoritativeRows[0]?.[startKey] || "",
+      clock_out_at: "",
+      total_minutes_worked: 0,
+      time_status: "",
+      time_label: "",
+    };
+    crewRow.clock_out_at = authoritativeRows.map((row) => row?.[endKey]).filter(Boolean).at(-1) || crewRow.clock_out_at;
+    crewRow.total_minutes_worked += result.minutes;
+    if (result.sessionAssessments.some(({ assessment }) => assessment.active)) crewRow.time_status = REPORT_TIME_STATUS.ACTIVE;
+    crewRow.time_label = crewRow.time_label || result.sessionAssessments.find(({ assessment }) => !assessment.included)?.assessment.label || "";
+    crewByWorker.set(workerId, crewRow);
   });
+  const crew = Array.from(crewByWorker.values());
   timeWarnings.push(...eventAssessments
     .map(({ event, assessment }) => makeReportTimeWarning(event, assessment, "Event"))
     .filter(Boolean));
@@ -22387,6 +22422,8 @@ async function enhanceDprMetricsWithFieldWork(baseMetrics, projectId, reportDate
   metrics.crew = crew;
   metrics.crew_count_today = crew.length;
   metrics.time_warnings = timeWarnings;
+  metrics.report_date_from = reportDate;
+  metrics.report_date_to = reportDateTo;
   metrics.locations_worked = locations;
   metrics.material_usage = materialUsage;
   metrics.material_items_used_today = materialUsage.length;
@@ -22762,7 +22799,10 @@ function renderDprMetrics(){
   const crew = getDprArray(metrics, "crew");
   const workOrders = getDprArray(metrics, "work_orders");
   const summary = String(state.dpr.summary || metrics.summary || "").trim();
+  const dateFrom = String(metrics.report_date_from || state.dpr.reportDateFrom || "");
+  const dateTo = String(metrics.report_date_to || state.dpr.reportDateTo || dateFrom);
   wrap.innerHTML = `
+    ${dateFrom ? `<div class="muted small"><strong>Reporting period:</strong> ${escapeHtml(formatDprActivityDay(dateFrom))}${dateTo && dateTo !== dateFrom ? ` through ${escapeHtml(formatDprActivityDay(dateTo))}` : ""}</div>` : ""}
     ${summary ? `<div class="dpr-summary-text">${escapeHtml(summary)}</div>` : ""}
     <div class="dpr-metric-grid">
       <div class="dpr-metric-tile"><span>Locations worked</span><strong>${locations.length + spliceLocations.length}</strong></div>
@@ -22783,8 +22823,8 @@ function renderDprMetrics(){
       <div class="dpr-metric-tile"><span>Bad readings</span><strong>${getDprNumber(metrics, "locations_bad_reading_remaining_today")}</strong></div>
       <div class="dpr-metric-tile"><span>Patrick review</span><strong>${getDprNumber(metrics, "locations_needing_patrick_review_today")}</strong></div>
       <div class="dpr-metric-tile"><span>No photo reason</span><strong>${getDprNumber(metrics, "locations_missing_photos_with_reason_today")}</strong></div>
-      <div class="dpr-metric-tile"><span>${t("dprMetricWorkOrders")}</span><strong>${getDprNumber(metrics, "work_orders_completed_today")}</strong></div>
-      <div class="dpr-metric-tile"><span>${t("dprMetricBlocked")}</span><strong>${getDprNumber(metrics, "blocked_items_today")}</strong></div>
+      <div class="dpr-metric-tile"><span>Work orders completed</span><strong>${getDprNumber(metrics, "work_orders_completed_today")}</strong></div>
+      <div class="dpr-metric-tile"><span>Blocked items</span><strong>${getDprNumber(metrics, "blocked_items_today")}</strong></div>
     </div>
     ${renderDprTimeWarnings(metrics.time_warnings)}
     ${renderDprFieldDayTimeline(metrics.field_day_sessions || [], metrics.field_day_events || [], metrics.field_location_closeouts || [])}
@@ -22814,7 +22854,7 @@ function renderDprMetrics(){
             <div class="dpr-photo-wrap">${renderDprPhotos(loc?.photos || [], "proof-photos")}</div>
           </article>
         `;
-      }).join("") : `<div class="muted small">No site/location activity captured for this date.</div>`}
+      }).join("") : `<div class="muted small">No site/location activity captured in the selected reporting period.</div>`}
     </div>
     <div class="dpr-section">
       <h3>Splicing locations</h3>
@@ -22834,7 +22874,7 @@ function renderDprMetrics(){
             <div class="dpr-photo-wrap">${renderDprPhotos(loc?.photos || [], "proof-photos")}</div>
           </article>
         `;
-      }).join("") : `<div class="muted small">No splice-location activity captured for this date.</div>`}
+      }).join("") : `<div class="muted small">No splice-location activity captured in the selected reporting period.</div>`}
     </div>
     <div class="dpr-section">
       <h3>Materials used</h3>
@@ -22847,7 +22887,7 @@ function renderDprMetrics(){
             </div>
           `).join("")}
         </div>
-      ` : `<div class="muted small">No material usage logged for this date.</div>`}
+      ` : `<div class="muted small">No material usage logged in the selected reporting period.</div>`}
     </div>
     <div class="dpr-section">
       <h3>Crew time</h3>
@@ -22860,7 +22900,7 @@ function renderDprMetrics(){
             </div>
           `).join("")}
         </div>
-      ` : `<div class="muted small">No crew time captured for this date.</div>`}
+      ` : `<div class="muted small">No crew time captured in the selected reporting period.</div>`}
     </div>
     ${workOrders.length ? `
       <div class="dpr-section">
@@ -22878,15 +22918,47 @@ function renderDprMetrics(){
   `;
 }
 
+function syncDprRangeStateFromInputs(){
+  const today = getSpecComDateKey();
+  const dateFrom = $("dprDateFrom")?.value || state.dpr.reportDateFrom || today;
+  const dateTo = $("dprDateTo")?.value || state.dpr.reportDateTo || dateFrom;
+  state.dpr.reportDateFrom = dateFrom;
+  state.dpr.reportDateTo = dateTo;
+  state.dpr.reportDate = dateFrom === dateTo ? dateFrom : null;
+  return { dateFrom, dateTo, dates: getDateKeysInRange(dateFrom, dateTo) };
+}
+
+function aggregateDprMetrics(metricsRows){
+  const aggregate = getDprDefaultMetrics();
+  (Array.isArray(metricsRows) ? metricsRows : []).forEach((metrics) => {
+    if (!metrics || typeof metrics !== "object") return;
+    Object.entries(aggregate).forEach(([key, current]) => {
+      if (typeof current === "number") aggregate[key] += getDprNumber(metrics, key);
+      else if (Array.isArray(current)) aggregate[key] = aggregate[key].concat(getDprArray(metrics, key));
+    });
+    if (!aggregate.project_name && metrics.project_name) aggregate.project_name = metrics.project_name;
+  });
+  return aggregate;
+}
+
 function setDprEditState(){
   const canEdit = hasAuthenticatedSession();
   const refreshBtn = $("btnDprRefresh");
+  const generateBtn = $("btnDprGenerate");
   const saveBtn = $("btnDprSave");
   const comments = $("dprComments");
   const hasProject = Boolean(state.dpr.projectId);
+  const singleDay = Boolean(state.dpr.reportDateFrom && state.dpr.reportDateFrom === state.dpr.reportDateTo);
   if (refreshBtn) refreshBtn.disabled = !canEdit || !hasProject;
-  if (saveBtn) saveBtn.disabled = !canEdit || !hasProject || !state.dpr.reportId;
-  if (comments) comments.disabled = !canEdit || !hasProject;
+  if (generateBtn) generateBtn.disabled = !canEdit || !hasProject || !singleDay;
+  if (saveBtn) saveBtn.disabled = !canEdit || !hasProject || !singleDay || !state.dpr.reportId;
+  if (comments) comments.disabled = !canEdit || !hasProject || !singleDay;
+  const rangeNote = $("dprRangeNote");
+  if (rangeNote){
+    rangeNote.textContent = singleDay
+      ? "Single-day mode: generate the report and save office comments below."
+      : "Range mode is read-only. Totals and evidence are combined across the selected dates.";
+  }
   const note = $("dprNote");
   if (note){
     if (!state.dpr.projectId){
@@ -22899,9 +22971,8 @@ function setDprEditState(){
 
 async function loadDailyProgressReport(){
   const select = $("dprProjectSelect");
-  const dateInput = $("dprDate");
   if (select) state.dpr.projectId = select.value || null;
-  if (dateInput) state.dpr.reportDate = dateInput.value || getSpecComDateKey();
+  const { dateFrom, dateTo, dates } = syncDprRangeStateFromInputs();
   const projectId = state.dpr.projectId;
   if (!projectId){
     state.dpr.reportId = null;
@@ -22912,13 +22983,19 @@ async function loadDailyProgressReport(){
     setDprEditState();
     return;
   }
+  if (!dates.length || dates.at(-1) !== dateTo){
+    toast("Date range required", "Choose a valid From/Through range of 93 days or fewer.");
+    return;
+  }
   if (isDemo){
-    const list = state.demo.dprReports || [];
-    const row = list.find((r) => r.project_id === projectId && r.report_date === state.dpr.reportDate) || null;
-    state.dpr.reportId = row?.id || null;
-    state.dpr.metrics = row?.metrics || null;
-    state.dpr.summary = row?.summary || row?.metrics?.summary || "";
-    if ($("dprComments")) $("dprComments").value = row?.comments || "";
+    const rows = (state.demo.dprReports || []).filter((row) => row.project_id === projectId && row.report_date >= dateFrom && row.report_date <= dateTo);
+    const singleRow = dateFrom === dateTo ? (rows[0] || null) : null;
+    state.dpr.reportId = singleRow?.id || null;
+    state.dpr.metrics = aggregateDprMetrics(rows.map((row) => row.metrics));
+    state.dpr.metrics.report_date_from = dateFrom;
+    state.dpr.metrics.report_date_to = dateTo;
+    state.dpr.summary = state.dpr.metrics.summary || "";
+    if ($("dprComments")) $("dprComments").value = singleRow?.comments || "";
     renderDprMetrics();
     setDprEditState();
     return;
@@ -22928,26 +23005,38 @@ async function loadDailyProgressReport(){
     setDprEditState();
     return;
   }
-  const { data, error } = await state.client
+  const metricsWrap = $("dprMetrics");
+  if (metricsWrap) metricsWrap.innerHTML = `<div class="muted small">Loading project activity from ${escapeHtml(dateFrom)} through ${escapeHtml(dateTo)}...</div>`;
+  const { data: savedRows, error } = await state.client
     .from("daily_progress_reports")
     .select("id, project_id, report_date, metrics, summary, comments, submitted_at, submitted_by")
     .eq("project_id", projectId)
-    .eq("report_date", state.dpr.reportDate)
-    .maybeSingle();
+    .gte("report_date", dateFrom)
+    .lte("report_date", dateTo)
+    .order("report_date", { ascending: true });
   if (error){
     toast("Daily report load error", error.message);
     return;
   }
-  state.dpr.reportId = data?.id || null;
-  state.dpr.metrics = data?.metrics
-    ? await enhanceDprMetricsWithFieldWork(data.metrics, projectId, state.dpr.reportDate, {
-      persist: Boolean(data?.id),
-      reportId: data?.id || null,
-    })
-    : null;
-  state.dpr.summary = data?.summary || data?.metrics?.summary || "";
-  if (state.dpr.metrics?.summary) state.dpr.summary = state.dpr.metrics.summary;
-  if ($("dprComments")) $("dprComments").value = data?.comments || "";
+  const savedByDate = new Map((savedRows || []).map((row) => [row.report_date, row]));
+  const baseMetricsRows = [];
+  for (let offset = 0; offset < dates.length; offset += 6){
+    const batch = dates.slice(offset, offset + 6);
+    const batchMetrics = await Promise.all(batch.map(async (date) => {
+      const { data, error: metricsError } = await state.client.rpc("fn_build_dpr_metrics", { p_project_id: projectId, p_date: date });
+      if (metricsError){
+        console.warn("[daily report] metrics load failed", { date, error: metricsError });
+        return savedByDate.get(date)?.metrics || getDprDefaultMetrics();
+      }
+      return data || getDprDefaultMetrics();
+    }));
+    baseMetricsRows.push(...batchMetrics);
+  }
+  const singleRow = dateFrom === dateTo ? (savedByDate.get(dateFrom) || null) : null;
+  state.dpr.reportId = singleRow?.id || null;
+  state.dpr.metrics = await enhanceDprMetricsWithFieldWork(aggregateDprMetrics(baseMetricsRows), projectId, dateFrom, { reportDateTo: dateTo });
+  state.dpr.summary = state.dpr.metrics?.summary || singleRow?.summary || "";
+  if ($("dprComments")) $("dprComments").value = singleRow?.comments || "";
   renderDprMetrics();
   setDprEditState();
 }
@@ -22962,8 +23051,12 @@ async function generateDailyProgressReport(){
     toast("Project required", t("dprNoProject"));
     return;
   }
-  const dateInput = $("dprDate");
-  if (dateInput) state.dpr.reportDate = dateInput.value || getSpecComDateKey();
+  const { dateFrom, dateTo } = syncDprRangeStateFromInputs();
+  if (dateFrom !== dateTo){
+    toast("Choose one day", "Generating and saving is available for a single day. Set From and Through to the same date.");
+    return;
+  }
+  state.dpr.reportDate = dateFrom;
   const comments = $("dprComments")?.value || null;
   if (isDemo){
     const metrics = {
@@ -23061,7 +23154,7 @@ async function saveDailyProgressComments(){
 
 async function autoSaveDailyProgressReport({
   projectId = state.technician.timesheet?.project_id || state.activeProject?.id || null,
-  reportDate = getLocalDateISO(),
+  reportDate = getSpecComDateKey(),
   comments = null,
   silent = false,
 } = {}){
@@ -25216,18 +25309,21 @@ async function loadFieldDaySession({ silent = true } = {}){
     renderMapFieldPanel();
     return null;
   }
-  if (state.fieldDay.loading) return state.fieldDay.session;
+  const projectId = String(state.activeProject.id);
+  if (state.fieldDay.loading && state.fieldDay.loadingProjectId === projectId) return state.fieldDay.session;
   state.fieldDay.loading = true;
+  state.fieldDay.loadingProjectId = projectId;
   try {
-    const workDate = getLocalDateISO();
+    const workDate = getSpecComDateKey();
     const { data, error } = await state.client
       .from("field_day_sessions")
       .select("id, user_id, project_id, work_date, started_at, ended_at, total_minutes, start_gps_lat, start_gps_lng, start_gps_accuracy_m, end_gps_lat, end_gps_lng, end_gps_accuracy_m, notes, created_at")
       .eq("user_id", state.user.id)
-      .eq("project_id", state.activeProject.id)
+      .eq("project_id", projectId)
       .eq("work_date", workDate)
       .order("created_at", { ascending: false })
       .limit(1);
+    if (!isProjectContextCurrent(projectId, state.activeProject?.id)) return null;
     if (error){
       if (!isMissingTable(error) && !silent) toast("Project day error", error.message);
       setFieldDayState(null, []);
@@ -25243,6 +25339,7 @@ async function loadFieldDaySession({ silent = true } = {}){
       .select("id, session_id, user_id, project_id, site_id, event_type, label, started_at, ended_at, duration_minutes, gps_lat, gps_lng, gps_accuracy_m, site_lat, site_lng, notes, work_codes, materials_used, created_at")
       .eq("session_id", session.id)
       .order("started_at", { ascending: true });
+    if (!isProjectContextCurrent(projectId, state.activeProject?.id)) return null;
     if (eventsRes.error){
       if (!isMissingTable(eventsRes.error) && !silent) toast("Project day error", eventsRes.error.message);
       setFieldDayState(session, []);
@@ -25251,8 +25348,11 @@ async function loadFieldDaySession({ silent = true } = {}){
     setFieldDayState(session, eventsRes.data || []);
     return state.fieldDay.session;
   } finally {
-    state.fieldDay.loading = false;
-    renderMapFieldPanel();
+    if (state.fieldDay.loadingProjectId === projectId){
+      state.fieldDay.loading = false;
+      state.fieldDay.loadingProjectId = null;
+    }
+    if (isProjectContextCurrent(projectId, state.activeProject?.id)) renderMapFieldPanel();
   }
 }
 
@@ -25284,7 +25384,7 @@ async function saveFieldDayAcceptance(sessionId, acceptedAt){
     project_id: state.activeProject.id,
     session_id: sessionId || null,
     accepted_at: acceptedAt,
-    work_date: getLocalDateISO(acceptedAt),
+    work_date: getSpecComDateKey(acceptedAt),
     device_user_agent: navigator.userAgent || "",
     notice_version: "recorded_project_day_v1",
     notice_text: getRecordedProjectDayNotice(),
@@ -25302,6 +25402,7 @@ async function saveFieldDayAcceptance(sessionId, acceptedAt){
 }
 
 async function startFieldDay(){
+  if (isEffectiveRootRole()) return;
   if (!state.activeProject?.id){
     toast("Project required", "Select a project before starting the day.");
     return;
@@ -25327,14 +25428,14 @@ async function startFieldDay(){
     accepted_at: now,
     user_id: state.user.id,
     project_id: state.activeProject.id,
-    work_date: getLocalDateISO(now),
+    work_date: getSpecComDateKey(now),
     device_user_agent: navigator.userAgent || "",
     notice_version: "recorded_project_day_v1",
   };
   const row = {
     user_id: state.user.id,
     project_id: state.activeProject.id,
-    work_date: getLocalDateISO(now),
+    work_date: getSpecComDateKey(now),
     started_at: now,
     start_gps_lat: gps.gps_lat ?? null,
     start_gps_lng: gps.gps_lng ?? null,
@@ -25358,6 +25459,7 @@ async function startFieldDay(){
 }
 
 async function startFieldDayEvent(eventType, { siteId = null, label: requestedLabel = "" } = {}){
+  if (isEffectiveRootRole()) return;
   const session = getOpenFieldDaySession();
   if (!session){
     toast("Start project day", "Tap Start Project Day before logging activities.");
@@ -25438,7 +25540,7 @@ async function endFieldDayEvent({ eventId = state.fieldDay.activeEvent?.id, note
   state.fieldDay.activeEvent = null;
   await autoSaveDailyProgressReport({
     projectId: event.project_id || state.activeProject?.id || null,
-    reportDate: getLocalDateISO(endedAt),
+    reportDate: getSpecComDateKey(endedAt),
     silent: true,
   });
   renderMapFieldPanel();
@@ -25498,7 +25600,11 @@ async function endFieldDayLocation(siteId, { closeout = null } = {}){
   });
   if (!saved) return;
   if (closeout){
-    await saveFieldCloseoutChecklistRecord(closeout);
+    const closeoutId = await saveFieldCloseoutChecklistRecord(closeout);
+    if (!closeoutId){
+      toast("Closeout not saved", "The checklist, notes, billing codes, or materials could not be saved. The location remains open so nothing is lost.", "error");
+      return;
+    }
   }
   await endFieldDayEvent({
     eventId: active.id,
@@ -25546,7 +25652,7 @@ async function endFieldDay(){
   state.fieldDay.activeEvent = null;
   await autoSaveDailyProgressReport({
     projectId: session.project_id,
-    reportDate: session.work_date || getLocalDateISO(endedAt),
+    reportDate: session.work_date || getSpecComDateKey(endedAt),
     silent: false,
   });
   renderMapFieldPanel();
@@ -25631,6 +25737,7 @@ function getFieldDayGuidance(selectedSite){
 }
 
 function renderFieldDayControls(gps, nearest, selectedSite){
+  if (isEffectiveRootRole()) return "";
   if (!state.activeProject?.id) return "";
   const session = state.fieldDay.session || null;
   const active = state.fieldDay.activeEvent || null;
@@ -25724,7 +25831,7 @@ function renderTodayWorklistCard(selectedSite){
         const latestLog = getCachedFieldWorkLogs(site.id)[0] || null;
         const parsed = parseFieldVisitWorkNotes(latestLog?.work_completed || "");
         const photoCount = getCachedSitePhotos(site.id).length;
-        const notesCount = getCachedFieldWorkLogs(site.id).filter((log) => log.work_completed).length + (site.notes ? 1 : 0);
+        const notesCount = getCachedFieldWorkLogs(site.id).filter((log) => log.work_completed).length;
         return `
           <button class="map-field-worklist-item ${toSiteIdKey(site.id) === selectedKey ? "is-selected" : ""}" type="button" data-map-field-action="selectWorklistSite" data-site-id="${escapeHtml(site.id)}">
             <span class="map-field-worklist-pin ${getMapFieldWorklistStatusClass(status)}"></span>
@@ -25732,7 +25839,7 @@ function renderTodayWorklistCard(selectedSite){
               <strong>${escapeHtml(getSiteDisplayName(site))}</strong>
               <small>${escapeHtml(parsed.visit_label ? `Visit ${parsed.visit_label}` : "Base location")}${parsed.before_reading ? ` | Before ${escapeHtml(parsed.before_reading)}` : ""}${parsed.after_reading ? ` | After ${escapeHtml(parsed.after_reading)}` : ""}</small>
             </span>
-            <em>${escapeHtml(status)} | ${photoCount} photos | ${notesCount} notes</em>
+            <em>${escapeHtml(status)} | ${photoCount} photos | ${notesCount} work notes</em>
           </button>
         `;
       }).join("")}
@@ -25742,6 +25849,7 @@ function renderTodayWorklistCard(selectedSite){
 }
 
 function renderFieldDayLocationControls(site){
+  if (isEffectiveRootRole()) return "";
   if (!site?.id) return "";
   const session = state.fieldDay.session || null;
   const active = state.fieldDay.activeEvent || null;
@@ -25951,16 +26059,17 @@ function renderActiveFieldVisitCard(site, draft, active){
       </div>
 
       <div class="map-field-step-card">
-        <div class="map-field-step-title">Step 4 - Splicing Codes</div>
+        <div class="map-field-step-title">Step 4 - Billing Codes</div>
         <input id="mapFieldSpliceCode" class="input compact" data-field-visit-input data-site-id="${escapeHtml(site.id)}" value="${escapeHtml(draft.codeValue)}" placeholder="Code" />
         <input id="mapFieldSpliceCodeRef" class="input compact" data-field-visit-input data-site-id="${escapeHtml(site.id)}" value="${escapeHtml(draft.codeRef)}" placeholder="Count / reference" />
         <input id="mapFieldSpliceCodeNotes" class="input compact" data-field-visit-input data-site-id="${escapeHtml(site.id)}" value="${escapeHtml(draft.codeNotes)}" placeholder="Code notes" />
-        <button class="btn secondary small" type="button" data-map-field-action="addDraftCode" data-site-id="${escapeHtml(site.id)}">Add Code</button>
+        <button class="btn secondary small" type="button" data-map-field-action="addDraftCode" data-site-id="${escapeHtml(site.id)}">Add Billing Code</button>
         ${renderFieldDraftListItems(draft.codes, "codes", site.id)}
       </div>
 
       <div class="map-field-step-card">
-        <div class="map-field-step-title">Step 5 - Description / Final Notes</div>
+        <div class="map-field-step-title">Step 5 - Today's Work Notes (Required)</div>
+        <div class="muted tiny">Enter what you found, what you completed, and what still needs attention. Imported location reference notes do not count.</div>
         <textarea id="mapFieldWorkCompleted" class="input compact" rows="4" data-field-visit-input data-site-id="${escapeHtml(site.id)}" placeholder="Describe what you found, what you fixed, and what still needs done.">${escapeHtml(draft.finalNotes)}</textarea>
         <label>Status</label>
         <select id="mapFieldFinalStatus" class="input compact" data-field-visit-input data-site-id="${escapeHtml(site.id)}">
@@ -25975,6 +26084,7 @@ function renderActiveFieldVisitCard(site, draft, active){
 }
 
 function renderFieldBreakLunchCard(){
+  if (isEffectiveRootRole()) return "";
   if (!state.activeProject?.id) return "";
   const session = state.fieldDay.session || null;
   const activeType = getActiveFieldDayEventType();
@@ -26000,6 +26110,7 @@ function renderFieldBreakLunchCard(){
 }
 
 function renderFieldDayEndCard(){
+  if (isEffectiveRootRole()) return "";
   if (!state.activeProject?.id) return "";
   const session = state.fieldDay.session || null;
   const activeType = getActiveFieldDayEventType();
@@ -26977,7 +27088,7 @@ function addMapFieldDraftCode(siteId){
   if (!draft) return false;
   const code = String(draft.codeValue || "").trim();
   if (!code){
-    toast("Code needed", "Enter a splicing code before adding it.");
+    toast("Code needed", "Enter a billing code before adding it.");
     return false;
   }
   draft.codes.push({
@@ -27003,26 +27114,20 @@ function removeMapFieldDraftListItem(siteId, listName, index){
 
 function getMapFieldVisitCodes(siteId){
   const draft = updateMapFieldVisitDraftFromInputs(siteId) || state.map.fieldVisitDraft;
-  if (Array.isArray(draft?.codes) && draft.codes.length){
-    return draft.codes
-      .map((row) => [row.code, row.ref ? `ref ${row.ref}` : "", row.notes].filter(Boolean).join(" - "))
-      .filter(Boolean);
-  }
+  const codes = collectBillingCodes(draft?.codes, { code: draft?.codeValue, ref: draft?.codeRef, notes: draft?.codeNotes });
+  if (codes.length) return codes;
   return parseMapFieldWorkCodes($("mapFieldWorkCodes")?.value || "");
 }
 
 function getMapFieldVisitMaterials(siteId){
   const draft = updateMapFieldVisitDraftFromInputs(siteId) || state.map.fieldVisitDraft;
-  if (Array.isArray(draft?.materials) && draft.materials.length){
-    return draft.materials
-      .map((row) => ({
-        item_key: String(row?.item_key || "").trim(),
-        qty_used: Number(row?.qty_used ?? 1) || 1,
-        unit: String(row?.unit || "each").trim(),
-        notes: String(row?.notes || "").trim(),
-      }))
-      .filter((row) => row.item_key);
-  }
+  const materials = collectMaterials(draft?.materials, {
+    item_key: draft?.materialItem,
+    qty_used: Number(draft?.materialQty || 1) || 1,
+    unit: draft?.materialUnit || "each",
+    notes: draft?.materialNotes || "",
+  });
+  if (materials.length) return materials;
   return parseMapFieldMaterialLines($("mapFieldMaterialsUsed")?.value || "");
 }
 
@@ -27085,6 +27190,17 @@ function normalizeCloseoutAnswer(value){
 
 function createDefaultCloseoutAnswers(visitDraft, site){
   const photoCount = getFieldVisitPhotoCount(site?.id, visitDraft?.visitLabel || "");
+  const billingCodeCount = collectBillingCodes(visitDraft?.codes, {
+    code: visitDraft?.codeValue,
+    ref: visitDraft?.codeRef,
+    notes: visitDraft?.codeNotes,
+  }).length;
+  const materialCount = collectMaterials(visitDraft?.materials, {
+    item_key: visitDraft?.materialItem,
+    qty_used: visitDraft?.materialQty,
+    unit: visitDraft?.materialUnit,
+    notes: visitDraft?.materialNotes,
+  }).length;
   return {
     before_reading_entered: visitDraft?.beforeReading ? "yes" : "no",
     after_reading_entered: visitDraft?.afterReading ? "yes" : "no",
@@ -27103,8 +27219,8 @@ function createDefaultCloseoutAnswers(visitDraft, site){
     previous_work_audited: visitDraft?.previousComplete === "yes" ? "yes" : (visitDraft?.previousComplete === "no" ? "no" : ""),
     issue_found: visitDraft?.workWrong === "yes" || visitDraft?.badReading === "yes" ? "yes" : "na",
     issue_repaired: visitDraft?.finalStatus === "Fixed" ? "yes" : "",
-    material_used_recorded: Array.isArray(visitDraft?.materials) && visitDraft.materials.length ? "yes" : "na",
-    splicing_code_recorded: Array.isArray(visitDraft?.codes) && visitDraft.codes.length ? "yes" : "na",
+    material_used_recorded: materialCount ? "yes" : "na",
+    splicing_code_recorded: billingCodeCount ? "yes" : "na",
     site_left_clean: "",
     location_safe_secured: "",
     before_photo_uploaded: getFieldVisitPhotoCount(site?.id, visitDraft?.visitLabel || "", "visit_before") ? "yes" : "no",
@@ -27192,10 +27308,14 @@ function getCloseoutMissingRequirements(site, visitDraft, closeoutDraft){
     missing.push(`Answer all closeout checklist items Yes, No, or N/A before finalizing: ${visible}${unanswered.length > 4 ? `, +${unanswered.length - 4} more` : ""}.`);
   }
   if (!FIELD_VISIT_FINAL_STATUSES.includes(finalStatus)) missing.push("Select final status.");
-  if (!visitDraft?.finalNotes) missing.push("Add description notes before finalizing.");
-  if (!photoCount && !(closeoutDraft?.noPhotoPossible && closeoutDraft?.noPhotoReason)){
-    missing.push("Upload photo or enter no-photo reason.");
-  }
+  missing.push(...getRequiredFieldEvidenceMissing({
+    notes: visitDraft?.finalNotes,
+    photoCount,
+    noPhotoPossible: closeoutDraft?.noPhotoPossible,
+    noPhotoReason: closeoutDraft?.noPhotoReason,
+    billingCodes: getMapFieldVisitCodes(site?.id),
+    materials: getMapFieldVisitMaterials(site?.id),
+  }));
   if (closeoutDraft?.answers?.test_result_still_bad === "yes" && !closeoutDraft.stillBadNote){
     missing.push("Still bad reading requires explanation.");
   }
@@ -27306,18 +27426,32 @@ async function saveFieldCloseoutChecklistRecord(payload){
     checklist: payload,
   };
   try {
-    const { data, error } = await state.client
-      .from("splicer_location_closeout_checklists")
-      .insert(row)
-      .select("id")
-      .maybeSingle();
+    let existingId = null;
+    if (row.location_visit_id){
+      const { data: existing, error: lookupError } = await state.client
+        .from("splicer_location_closeout_checklists")
+        .select("id")
+        .eq("location_visit_id", row.location_visit_id)
+        .order("submitted_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (lookupError && !isMissingTable(lookupError)){
+        console.warn("[field closeout] existing checklist lookup failed", lookupError);
+        return null;
+      }
+      existingId = existing?.id || null;
+    }
+    const query = existingId
+      ? state.client.from("splicer_location_closeout_checklists").update(row).eq("id", existingId)
+      : state.client.from("splicer_location_closeout_checklists").insert(row);
+    const { data, error } = await query.select("id").maybeSingle();
     if (error){
       if (!isMissingTable(error)){
         console.warn("[field closeout] checklist save failed", error);
       }
       return null;
     }
-    return data?.id || null;
+    return data?.id || existingId || null;
   } catch (error) {
     console.warn("[field closeout] checklist save failed", error);
     return null;
@@ -27489,7 +27623,7 @@ async function recordFieldLocationPingFromGps(gps, { nearest = null, source = "t
     user_id: state.user.id,
     project_id: projectId,
     site_id: siteId,
-    work_date: getLocalDateISO(capturedAt),
+    work_date: getSpecComDateKey(capturedAt),
     captured_at: capturedAt,
     gps_lat: lat,
     gps_lng: lng,
@@ -27608,7 +27742,7 @@ async function saveMapFieldWorkLog(siteId, { allowEmpty = false, startedAt = nul
     user_id: state.user?.id || null,
     project_id: projectId,
     site_id: site.id,
-    work_date: getLocalDateISO(completed),
+    work_date: getSpecComDateKey(completed),
     arrived_at: startedAt || gps?.captured_at || completed,
     completed_at: completed,
     gps_lat: gps?.lat ?? null,
@@ -27631,16 +27765,34 @@ async function saveMapFieldWorkLog(siteId, { allowEmpty = false, startedAt = nul
       toast("Sign in required", "Sign in before saving field work.");
       return null;
     }
-    const { data, error } = await state.client
-      .from("field_work_logs")
-      .insert(row)
+    let existingId = null;
+    if (startedAt){
+      const { data: existing, error: lookupError } = await state.client
+        .from("field_work_logs")
+        .select("id")
+        .eq("user_id", state.user.id)
+        .eq("site_id", site.id)
+        .eq("arrived_at", startedAt)
+        .order("completed_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (lookupError && !isMissingTable(lookupError)){
+        toast("Work log save failed", lookupError.message || "Could not verify the existing work log.", "error");
+        return null;
+      }
+      existingId = existing?.id || null;
+    }
+    const query = existingId
+      ? state.client.from("field_work_logs").update(row).eq("id", existingId)
+      : state.client.from("field_work_logs").insert(row);
+    const { data, error } = await query
       .select("id, user_id, project_id, site_id, work_date, arrived_at, completed_at, gps_lat, gps_lng, gps_accuracy_m, nearest_distance_m, status_before, status_after, work_completed, work_codes, materials_used, created_at")
       .maybeSingle();
     if (error){
       toast("Work log save failed", isMissingTable(error) ? "Database migration for field work logs has not been applied yet." : error.message, "error");
       return null;
     }
-    setCachedFieldWorkLogs(site.id, [data, ...getCachedFieldWorkLogs(site.id)]);
+    setCachedFieldWorkLogs(site.id, [data, ...getCachedFieldWorkLogs(site.id).filter((row) => row.id !== data?.id)]);
     savedRow = data;
   }
   setSiteWorkflowStatus(site.id, statusAfter);
@@ -27965,7 +28117,7 @@ function syncMapToSearchResults(resultSet){
 
 async function loadProjectFieldPhotos(projectId){
   if (isDemo || !state.client || !projectId){
-    state.map.fieldPhotos = [];
+    if (!projectId || isProjectContextCurrent(projectId, state.activeProject?.id)) state.map.fieldPhotos = [];
     return;
   }
   const { data, error } = await state.client
@@ -27975,9 +28127,10 @@ async function loadProjectFieldPhotos(projectId){
     .order("created_at", { ascending: false });
   if (error){
     console.error("field_photos load error:", error);
-    state.map.fieldPhotos = [];
+    if (isProjectContextCurrent(projectId, state.activeProject?.id)) state.map.fieldPhotos = [];
     return;
   }
+  if (!isProjectContextCurrent(projectId, state.activeProject?.id)) return;
   state.map.fieldPhotos = Array.isArray(data) ? data : [];
 }
 
@@ -28005,6 +28158,7 @@ async function loadProjectSites(projectId){
     return;
   }
   const { data, error } = await fetchSitesByProject(projectId);
+  if (!isProjectContextCurrent(projectId, state.activeProject?.id)) return;
   if (error){
     toast("Sites load error", error.message);
     return;
@@ -28016,6 +28170,7 @@ async function loadProjectSites(projectId){
   state.map.sitePhotosBySiteId.clear();
   state.map.fieldWorkLogsBySiteId.clear();
   await loadProjectFieldPhotos(projectId);
+  if (!isProjectContextCurrent(projectId, state.activeProject?.id)) return;
   dlog("[data] loadProjectSites complete", {
     projectId,
     siteCount: state.projectSites.length,
@@ -29927,7 +30082,32 @@ async function loadBillingLocations(projectId){
 
 function setActiveProjectById(id){
   const next = state.projects.find(p => p.id === id) || null;
+  const currentProjectId = String(state.activeProject?.id || "");
+  const nextProjectId = String(next?.id || "");
+  const openFieldDay = getOpenFieldDaySession();
+  const openFieldDayProjectId = openFieldDay ? (openFieldDay.project_id || currentProjectId) : null;
+  if (currentProjectId !== nextProjectId && !canSwitchFieldProject(openFieldDayProjectId, nextProjectId)){
+    toast("End active project day", `End the recorded project day for ${state.activeProject?.name || "the current project"} before switching projects.`, "error");
+    return false;
+  }
   state.activeProject = next;
+  if (currentProjectId !== nextProjectId){
+    setFieldDayState(null, []);
+    state.projectSites = [];
+    state.activeSite = null;
+    state.map.fieldSelectedSiteId = "";
+    state.map.fieldVisitDraft = null;
+    state.map.fieldCloseoutOpen = false;
+    state.map.fieldCloseoutDraft = null;
+    state.map.nearestSiteId = "";
+    state.map.nearestSiteDistanceM = null;
+    state.map.fieldPhotos = [];
+    state.map.siteSearchIndex.clear();
+    state.map.siteCodesBySiteId.clear();
+    state.map.sitePhotosBySiteId.clear();
+    state.map.fieldWorkLogsBySiteId.clear();
+    state.map.siteWorkflowById.clear();
+  }
   setActiveOrgContext(next?.org_id || state.profile?.org_id || state.activeOrgId || null);
   if (state.activeOrgId && state.ksInvoices?.pendingImportFile && !state.ksInvoices.importing){
     const pending = state.ksInvoices.pendingImportFile;
@@ -30002,6 +30182,8 @@ function setActiveProjectById(id){
     projectName: next?.name || null,
     activeView: activeViewId,
   });
+  renderMapFieldPanel();
+  return true;
 }
 
 async function saveCurrentProjectPreference(projectId){
@@ -37527,11 +37709,9 @@ function wireUI(){
       if (action === "openCreateProject"){
         openCreateProjectModal();
       } else if (action === "adminOpenProject" && projectId){
-        setActiveProjectById(projectId);
-        toast("Project opened", state.activeProject?.name || "Project opened.");
+        if (setActiveProjectById(projectId)) toast("Project opened", state.activeProject?.name || "Project opened.");
       } else if (action === "adminDeleteProject" && projectId){
-        setActiveProjectById(projectId);
-        openDeleteProjectModal();
+        if (setActiveProjectById(projectId)) openDeleteProjectModal();
       } else if (action === "adminOpenCreateCompany"){
         toast("Companies", "Company creation is not wired yet.");
       }
@@ -38601,17 +38781,30 @@ function wireUI(){
   }
   const dprProjectSelect = $("dprProjectSelect");
   if (dprProjectSelect){
-    dprProjectSelect.addEventListener("change", () => loadDailyProgressReport());
+    dprProjectSelect.addEventListener("change", () => {
+      state.dpr.projectId = dprProjectSelect.value || null;
+      setDprEditState();
+    });
   }
-  const dprDate = $("dprDate");
-  if (dprDate){
-    if (!dprDate.value) dprDate.value = getSpecComDateKey();
-    state.dpr.reportDate = dprDate.value;
-    dprDate.addEventListener("change", () => loadDailyProgressReport());
+  const dprDateTo = $("dprDateTo");
+  const dprDateFrom = $("dprDateFrom");
+  if (dprDateTo && !dprDateTo.value) dprDateTo.value = getSpecComDateKey();
+  if (dprDateFrom && !dprDateFrom.value){
+    const defaultFrom = new Date(`${getSpecComDateKey()}T12:00:00Z`);
+    defaultFrom.setUTCDate(defaultFrom.getUTCDate() - 30);
+    dprDateFrom.value = defaultFrom.toISOString().slice(0, 10);
   }
+  state.dpr.reportDateFrom = dprDateFrom?.value || null;
+  state.dpr.reportDateTo = dprDateTo?.value || null;
+  dprDateFrom?.addEventListener("change", () => { syncDprRangeStateFromInputs(); setDprEditState(); });
+  dprDateTo?.addEventListener("change", () => { syncDprRangeStateFromInputs(); setDprEditState(); });
   const dprRefreshBtn = $("btnDprRefresh");
   if (dprRefreshBtn){
-    dprRefreshBtn.addEventListener("click", () => generateDailyProgressReport());
+    dprRefreshBtn.addEventListener("click", () => loadDailyProgressReport());
+  }
+  const dprGenerateBtn = $("btnDprGenerate");
+  if (dprGenerateBtn){
+    dprGenerateBtn.addEventListener("click", () => generateDailyProgressReport());
   }
   const dprSaveBtn = $("btnDprSave");
   if (dprSaveBtn){
@@ -38635,11 +38828,11 @@ function wireUI(){
   }
   const dprUserDateTo = $("dprUserDateTo");
   const dprUserDateFrom = $("dprUserDateFrom");
-  if (dprUserDateTo && !dprUserDateTo.value) dprUserDateTo.value = getLocalDateISO();
+  if (dprUserDateTo && !dprUserDateTo.value) dprUserDateTo.value = getSpecComDateKey();
   if (dprUserDateFrom && !dprUserDateFrom.value){
-    const fromDate = new Date();
-    fromDate.setDate(fromDate.getDate() - 30);
-    dprUserDateFrom.value = getLocalDateISO(fromDate);
+    const fromDate = new Date(`${getSpecComDateKey()}T12:00:00Z`);
+    fromDate.setUTCDate(fromDate.getUTCDate() - 30);
+    dprUserDateFrom.value = fromDate.toISOString().slice(0, 10);
   }
   state.dpr.userDateFrom = dprUserDateFrom?.value || null;
   state.dpr.userDateTo = dprUserDateTo?.value || null;
@@ -38655,9 +38848,11 @@ function wireUI(){
       } else if (state.technician.timesheet?.project_id){
         state.dpr.projectId = state.technician.timesheet.project_id;
       }
-      state.dpr.reportDate = getLocalDateISO();
-      const dateInput = $("dprDate");
-      if (dateInput) dateInput.value = state.dpr.reportDate;
+      state.dpr.reportDate = getSpecComDateKey();
+      state.dpr.reportDateFrom = state.dpr.reportDate;
+      state.dpr.reportDateTo = state.dpr.reportDate;
+      if ($("dprDateFrom")) $("dprDateFrom").value = state.dpr.reportDate;
+      if ($("dprDateTo")) $("dprDateTo").value = state.dpr.reportDate;
       setActiveView("viewDailyReport");
     });
   }
