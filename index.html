@@ -2112,11 +2112,6 @@
       <span></span><span></span><span></span>
     </button>
     <div class="nav-tools">
-      <img
-        src="assets/speccom_logo_2.png"
-        alt="SpecCom"
-        class="nav-logo-img"
-      />
       <button class="nav-util" id="theme-toggle-btn" title="Toggle light / dark mode" type="button">
         <svg id="theme-icon-dark" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
           <path d="M13.5 9A5.5 5.5 0 0 1 7 2.5a5.5 5.5 0 1 0 6.5 6.5z"/>
@@ -2181,6 +2176,11 @@
       <span id="pendingUploadsCount" class="badge" style="display:none; position:absolute; top:-4px; right:-4px; background:#ff6b6b; color:white; font-size:10px; padding:2px 5px; border-radius:9px; font-weight:700;">0</span>
     </div>
     <span id="saveStatusBadge"></span>
+    <img
+      src="assets/speccom_logo_2.png"
+      alt="SpecCom"
+      class="nav-logo-img nav-logo-right"
+    />
   </nav>
   <div class="page container">
     <div class="spacer"></div>
@@ -2778,6 +2778,80 @@
           <div class="card" style="margin-top:12px;">
             <h2>Workforce Status Board</h2>
             <div id="supervisorCrewStatus" style="margin-top:10px;"></div>
+          </div>
+        </section>
+
+        <section id="viewRootCommandCenter" class="view root-command-center" aria-labelledby="rootCommandCenterTitle">
+          <div class="root-cc-header">
+            <div>
+              <div class="root-cc-eyebrow">ROOT · OSP PROJECT CONTROL</div>
+              <h1 id="rootCommandCenterTitle">ROOT Command Center</h1>
+              <div id="rootCcProjectName" class="muted">Select an active project to begin the field audit.</div>
+            </div>
+            <div class="root-cc-header-actions">
+              <button class="btn secondary" type="button" data-root-cc-action="refresh">Refresh Intelligence</button>
+              <button class="btn ghost" type="button" data-root-cc-action="open-map">Open Map</button>
+            </div>
+          </div>
+
+          <div id="rootCcAccessNotice" class="root-cc-access-notice" hidden>ROOT authorization is required.</div>
+          <div id="rootCcLoading" class="root-cc-loading" hidden>Reading active-project evidence…</div>
+
+          <section class="root-cc-section">
+            <div class="root-cc-section-title"><div><span>01</span><h2>Project Overview</h2></div><small>Live and derived metrics are labeled separately.</small></div>
+            <div id="rootCcMetrics" class="root-cc-metrics"></div>
+          </section>
+
+          <div class="root-cc-layout">
+            <section class="root-cc-section root-cc-primary-panel">
+              <div class="root-cc-section-title"><div><span>02</span><h2>Trouble Radar</h2></div><small>Read-only exceptions</small></div>
+              <div class="root-cc-toolbar">
+                <select id="rootCcExceptionFilter" class="input compact" aria-label="Filter exceptions">
+                  <option value="all">All exceptions</option>
+                  <option value="critical">Critical</option>
+                  <option value="attention">Needs attention</option>
+                  <option value="review">Review</option>
+                </select>
+                <button class="btn secondary small" type="button" data-root-cc-action="next-exception">Open Next</button>
+              </div>
+              <div id="rootCcExceptions" class="root-cc-exceptions"></div>
+            </section>
+
+            <aside class="root-cc-side-stack">
+              <section class="root-cc-section root-cc-search-card">
+                <div class="root-cc-section-title"><div><span>03</span><h2>Project Search</h2></div></div>
+                <div class="root-cc-search-row">
+                  <input id="rootCcSearchInput" class="input" type="search" placeholder="NP, CP, F35, PON, cable, notes…" />
+                  <button class="btn secondary" type="button" data-root-cc-action="search">Search</button>
+                </div>
+                <div id="rootCcSearchResults" class="root-cc-search-results"><div class="muted small">Search the active project only.</div></div>
+              </section>
+
+              <section class="root-cc-section root-cc-qtool-card">
+                <div class="root-cc-q-badge">Q TOOL</div>
+                <h2>Project X-Ray</h2>
+                <p>Reveal evidence gaps and trouble severity directly on the project map without changing a record.</p>
+                <button class="btn root-cc-q-button" type="button" data-root-cc-action="xray">SHOW PROJECT X-RAY</button>
+              </section>
+
+              <section class="root-cc-section">
+                <div class="root-cc-section-title"><div><span>04</span><h2>Node 54</h2></div></div>
+                <div id="rootCcNode54Summary" class="root-cc-node54-summary"></div>
+                <button class="btn node54-primary" type="button" data-root-cc-action="node54">NODE 54 DIAGNOSTICS</button>
+              </section>
+            </aside>
+          </div>
+
+          <div class="root-cc-layout root-cc-lower-layout">
+            <section class="root-cc-section">
+              <div class="root-cc-section-title"><div><span>05</span><h2>Cleanup Queue</h2></div><small>No automatic edits</small></div>
+              <div id="rootCcCleanup" class="root-cc-cleanup"></div>
+            </section>
+            <section class="root-cc-section">
+              <div class="root-cc-section-title"><div><span>06</span><h2>Field Brief</h2></div></div>
+              <button class="btn secondary" type="button" data-root-cc-action="brief">BUILD FIELD BRIEF</button>
+              <div id="rootCcFieldBrief" class="root-cc-field-brief"><div class="muted small">Build a deterministic briefing from the evidence currently loaded.</div></div>
+            </section>
           </div>
         </section>
 
@@ -3490,6 +3564,10 @@
         </div>
         <div class="menu-section">
           <div class="muted small menu-title">Navigation</div>
+          <button id="btnMenuRootCommandCenter" class="menu-link root-only-control" type="button" data-view="viewRootCommandCenter" style="display:none;">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 11V6l5-4 5 4v5"/><path d="M4.5 11V8h5v3"/><circle cx="7" cy="5.5" r="1"/></svg>
+            ROOT Command Center
+          </button>
           <button class="menu-link" type="button" data-view="viewMap">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="5.5"/><path d="M7 4v3l2 1.5"/></svg>
             Home

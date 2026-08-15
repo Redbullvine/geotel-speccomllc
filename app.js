@@ -34,6 +34,11 @@ import {
   NODE54_STOPS,
   NODE54_THRESHOLDS,
 } from "./services/node54Diagnostics.mjs";
+import {
+  analyzeRootProject,
+  buildRootFieldBrief,
+  searchRootProject,
+} from "./services/rootCommandCenter.mjs";
 
 const isDebug = new URLSearchParams(location.search).has("debug");
 const dlog = (...args) => { if (isDebug) console.log(...args); };
@@ -461,6 +466,18 @@ const state = {
     suggestedStopId: "",
     layer: null,
     pendingPhoto: null,
+  },
+  rootCommandCenter: {
+    projectId: "",
+    loading: false,
+    loadToken: 0,
+    analysis: null,
+    unavailable: [],
+    exceptionFilter: "all",
+    searchTerm: "",
+    xrayEnabled: false,
+    xrayLayer: null,
+    fieldBrief: null,
   },
   pinOverview: {
     open: false,
@@ -3255,6 +3272,10 @@ function setActiveView(viewId, { syncHash = true } = {}){
   if (isSubcontractorOnboardingLocked() && viewId !== "viewOnboarding"){
     viewId = "viewOnboarding";
   }
+  if (viewId === "viewRootCommandCenter" && !isEffectiveRootRole()){
+    viewId = getDefaultView();
+    toast("ROOT access required", "The ROOT Command Center is not available for this account.", "error");
+  }
   if (viewId !== "viewWarehouseScan"){
     stopWarehouseScanCamera();
   }
@@ -3272,6 +3293,10 @@ function setActiveView(viewId, { syncHash = true } = {}){
   if (viewId === "viewAdmin"){
     renderAdminWorkspace(_activeAdminTab || "users");
     loadAdminMaterialSettings();
+  }
+  if (viewId === "viewRootCommandCenter"){
+    renderRootCommandCenter();
+    void loadRootCommandCenterData({ silent: true });
   }
   if (viewId === "viewOnboarding"){
     renderSubcontractorOnboarding();
@@ -11055,7 +11080,7 @@ function canShowModule(moduleKey){
 }
 
 function getProductionAllowedViews(){
-  return new Set(["viewDashboard", "viewOnboarding", "viewTechnician", "viewNodes", "viewPhotos", "viewBilling", "viewInvoices", "viewMap", "viewCatalog", "viewWarehouseScan", "viewAlerts", "viewAdmin", "viewSettings", "viewLabor", "viewDispatch", "viewSupervisor", "viewDailyReport"]);
+  return new Set(["viewDashboard", "viewOnboarding", "viewTechnician", "viewNodes", "viewPhotos", "viewBilling", "viewInvoices", "viewMap", "viewCatalog", "viewWarehouseScan", "viewAlerts", "viewAdmin", "viewSettings", "viewLabor", "viewDispatch", "viewSupervisor", "viewDailyReport", "viewRootCommandCenter"]);
 }
 
 function canViewLabor(){
@@ -12277,6 +12302,7 @@ function parseViewFromHash(hashValue = window.location.hash){
   if (routeToken === "dispatch" || routeToken === "viewdispatch") return "viewDispatch";
   if (routeToken === "supervisor" || routeToken === "viewsupervisor") return "viewSupervisor";
   if (routeToken === "admin" || routeToken === "viewadmin") return "viewAdmin";
+  if (["root", "command-center", "root-command-center", "viewrootcommandcenter"].includes(routeToken)) return "viewRootCommandCenter";
   return null;
 }
 
@@ -12302,6 +12328,8 @@ function syncHashForView(viewId){
     nextHash = "#supervisor";
   } else if (viewId === "viewAdmin"){
     nextHash = _activeAdminTab === "onboarding" ? "#admin/onboarding" : "#admin";
+  } else if (viewId === "viewRootCommandCenter"){
+    nextHash = "#root-command-center";
   } else {
     return;
   }
@@ -12664,6 +12692,7 @@ function isViewAllowed(viewId){
   if (isFieldSubcontractorMode()){
     return FIELD_SUBCONTRACTOR_ALLOWED_VIEWS.has(viewId);
   }
+  if (viewId === "viewRootCommandCenter") return isEffectiveRootRole();
   if (isDemoShowcaseMode()){
     return true;
   }
@@ -26761,19 +26790,283 @@ async function saveNode54Reading(){
   toast("Diagnostic reading saved", `${stepItem.path} ${measurementDbm.toFixed(2)} dBm saved to this device.`);
 }
 
+const ROOT_CC_XRAY_COLORS = Object.freeze({
+  critical: "#ef4444",
+  attention: "#f59e0b",
+  review: "#38bdf8",
+  clear: "#22c55e",
+});
+
+function clearRootXrayLayer(){
+  const layer = state.rootCommandCenter.xrayLayer;
+  if (layer && state.map.instance){
+    try{ state.map.instance.removeLayer(layer); } catch {}
+  }
+  state.rootCommandCenter.xrayLayer = null;
+}
+
+function resetRootCommandCenterProject(){
+  clearRootXrayLayer();
+  state.rootCommandCenter.projectId = "";
+  state.rootCommandCenter.analysis = null;
+  state.rootCommandCenter.unavailable = [];
+  state.rootCommandCenter.fieldBrief = null;
+  state.rootCommandCenter.xrayEnabled = false;
+}
+
+async function runRootCommandCenterSource(label, query){
+  try{
+    const { data, error } = await query;
+    if (error){
+      if (!isMissingTable(error)) console.warn(`[root command center] ${label} unavailable`, error);
+      return { label, rows: [], error };
+    }
+    return { label, rows: Array.isArray(data) ? data : [], error: null };
+  } catch (error){
+    console.warn(`[root command center] ${label} unavailable`, error);
+    return { label, rows: [], error };
+  }
+}
+
+async function loadRootCommandCenterData({ silent = false, force = false } = {}){
+  if (!isEffectiveRootRole()){
+    state.rootCommandCenter.analysis = null;
+    renderRootCommandCenter();
+    return null;
+  }
+  const projectId = String(state.activeProject?.id || "");
+  if (!projectId){
+    resetRootCommandCenterProject();
+    renderRootCommandCenter();
+    return null;
+  }
+  if (!force && state.rootCommandCenter.loading && state.rootCommandCenter.projectId === projectId) return state.rootCommandCenter.analysis;
+  if (!force && state.rootCommandCenter.analysis && state.rootCommandCenter.projectId === projectId){
+    renderRootCommandCenter();
+    return state.rootCommandCenter.analysis;
+  }
+  const token = ++state.rootCommandCenter.loadToken;
+  state.rootCommandCenter.loading = true;
+  state.rootCommandCenter.projectId = projectId;
+  renderRootCommandCenter();
+  const sites = (state.projectSites || []).filter((site) => String(site?.project_id || "") === projectId);
+  let media = [];
+  let codes = [];
+  let workLogs = [];
+  let closeouts = [];
+  let redlines = [];
+  const unavailable = [];
+  if (!isDemo && state.client){
+    const siteIds = sites.map((site) => site.id).filter(Boolean);
+    const sources = await Promise.all([
+      siteIds.length
+        ? runRootCommandCenterSource("Location photos", state.client.from("site_media").select("id, site_id, media_path, created_at, gps_lat, gps_lng").in("site_id", siteIds).limit(5000))
+        : Promise.resolve({ label: "Location photos", rows: [], error: null }),
+      siteIds.length
+        ? runRootCommandCenterSource("Site codes", state.client.from("site_codes").select("id, site_id, code, created_at").in("site_id", siteIds).limit(5000))
+        : Promise.resolve({ label: "Site codes", rows: [], error: null }),
+      runRootCommandCenterSource("Field work logs", state.client.from("field_work_logs").select("id, project_id, site_id, user_id, work_date, completed_at, nearest_distance_m, status_before, status_after, work_completed, created_at").eq("project_id", projectId).order("completed_at", { ascending: false }).limit(5000)),
+      runRootCommandCenterSource("Closeout checklists", state.client.from("splicer_location_closeout_checklists").select("id, project_id, base_location_id, user_id, visit_label, submitted_at, checklist, created_at").eq("project_id", projectId).order("submitted_at", { ascending: false }).limit(5000)),
+      runRootCommandCenterSource("Redlines", state.client.from("redline_markers").select("id, project_id, site_id, attached_node_id, node_name, change_type, notes, status, created_at, updated_at").eq("project_id", projectId).order("created_at", { ascending: false }).limit(5000)),
+    ]);
+    if (token !== state.rootCommandCenter.loadToken || projectId !== String(state.activeProject?.id || "")) return null;
+    [media, codes, workLogs, closeouts, redlines] = sources.map((source) => source.rows);
+    sources.filter((source) => source.error).forEach((source) => unavailable.push(source.label));
+  }
+  const analysis = analyzeRootProject({ project: state.activeProject, sites, media, codes, workLogs, closeouts, redlines, opticalConcernThresholdDbm: TEST_RESULT_REVISIT_THRESHOLD_DB });
+  if (token !== state.rootCommandCenter.loadToken || projectId !== String(state.activeProject?.id || "")) return null;
+  state.rootCommandCenter.analysis = analysis;
+  state.rootCommandCenter.unavailable = unavailable;
+  state.rootCommandCenter.loading = false;
+  if (isNode54Project(state.activeProject) && state.node54Diagnostics.projectId !== projectId) loadNode54Session(projectId);
+  renderRootCommandCenter();
+  renderMapFieldPanel();
+  if (state.rootCommandCenter.xrayEnabled) renderRootXrayLayer();
+  if (!silent) toast("Project intelligence refreshed", `${analysis.metrics.total} locations analyzed without changing project data.`);
+  return analysis;
+}
+
+function getRootCcFilteredIssues(){
+  const issues = state.rootCommandCenter.analysis?.issues || [];
+  const filter = state.rootCommandCenter.exceptionFilter || "all";
+  if (filter === "all") return issues;
+  return issues.filter((issue) => issue.severity === filter);
+}
+
+function renderRootCcMetrics(analysis){
+  const metrics = analysis?.metrics;
+  if (!metrics) return `<div class="root-cc-empty">No active-project metrics loaded.</div>`;
+  const cards = [
+    ["Locations", metrics.total, "Stored active-project site records", "live"],
+    ["Complete", metrics.completed, "Derived from latest closeout/work-log evidence", "derived"],
+    ["Needs Return", metrics.needsReturn, "Latest explicit closeout status", "live"],
+    ["Escalated", metrics.escalated, "Latest explicit closeout status", "live"],
+    ["Optical concern", metrics.opticalConcern, `Derived: worst stored value below ${analysis.opticalConcernThresholdDbm} dBm`, "derived"],
+    ["Untested", metrics.untested, "Both imported test fields blank", "derived"],
+    ["Missing GPS", metrics.missingGps, "No usable site coordinates", "derived"],
+    ["Missing closeout", metrics.visitedNoCloseout, "Field work log exists without a closeout", "derived"],
+    ["Notes, no closeout", metrics.notesNoCloseout, "Location notes exist without a structured closeout", "review"],
+    ["Evidence gaps", metrics.missingPhotosAfterWork, "Work/closeout exists with no media, photo count, or documented exception", "derived"],
+    ["Open Redlines", metrics.openRedlines, "Linked Redline status not resolved/closed", "derived"],
+  ];
+  return `<div class="root-cc-progress-card"><div><span>Project readiness</span><strong>${metrics.progressPercent}%</strong></div><div class="root-cc-progress-track"><i style="width:${Math.max(0, Math.min(100, metrics.progressPercent))}%"></i></div></div>${cards.map(([label, value, detail, kind]) => `<article class="root-cc-metric"><span>${escapeHtml(label)}</span><strong>${Number(value || 0)}</strong><small>${escapeHtml(detail)}</small><em>${kind}</em></article>`).join("")}`;
+}
+
+function renderRootCcExceptions(){
+  const wrap = $("rootCcExceptions");
+  if (!wrap) return;
+  const issues = getRootCcFilteredIssues();
+  wrap.innerHTML = issues.length ? issues.slice(0, 150).map((issue) => `
+    <article class="root-cc-exception is-${escapeHtml(issue.severity)}">
+      <div class="root-cc-exception-main"><span>${escapeHtml(issue.label)}</span><strong>${escapeHtml(issue.location)}</strong><p>${escapeHtml(issue.why)}</p><small>${escapeHtml(issue.evidence)}</small></div>
+      <button class="btn ghost small" type="button" data-root-cc-action="open-location" data-site-id="${escapeHtml(issue.siteId)}">OPEN ON MAP</button>
+    </article>`).join("") : `<div class="root-cc-empty">No exceptions match this filter.</div>`;
+}
+
+function renderRootCcSearchResults(){
+  const wrap = $("rootCcSearchResults");
+  if (!wrap) return;
+  const term = state.rootCommandCenter.searchTerm;
+  if (!term){ wrap.innerHTML = `<div class="muted small">Search the active project only.</div>`; return; }
+  const matches = searchRootProject(state.rootCommandCenter.analysis, term);
+  wrap.innerHTML = matches.length ? matches.slice(0, 60).map((record) => `
+    <article class="root-cc-search-result"><div><strong>${escapeHtml(record.site?.name || "Unnamed location")}</strong><span>${record.worstReading === null ? "No test" : `${record.worstReading.toFixed(2)} dBm`} · ${record.media.length} photo${record.media.length === 1 ? "" : "s"} · ${record.issues.length} flag${record.issues.length === 1 ? "" : "s"}</span></div><button class="btn ghost small" type="button" data-root-cc-action="open-location" data-site-id="${escapeHtml(record.siteId)}">OPEN ON MAP</button></article>`).join("") : `<div class="root-cc-empty">No active-project records match “${escapeHtml(term)}”.</div>`;
+}
+
+function renderRootCcCleanup(){
+  const wrap = $("rootCcCleanup");
+  if (!wrap) return;
+  const issues = state.rootCommandCenter.analysis?.issues || [];
+  const groups = [
+    ["Needs Return", ["needs_return"]],
+    ["Failed / Weak Test", ["weak_test"]],
+    ["Missing Test", ["missing_test"]],
+    ["Missing Evidence", ["closeout_missing_photo", "visited_no_closeout"]],
+    ["Data Conflict", ["billing_overage", "duplicate_location", "location_mismatch"]],
+    ["Audit Flag", ["escalated", "open_redline"]],
+    ["Unknown / Review", ["missing_gps", "notes_no_closeout"]],
+  ];
+  wrap.innerHTML = groups.map(([label, types]) => {
+    const rows = issues.filter((issue) => types.includes(issue.type));
+    return `<details class="root-cc-cleanup-group" ${rows.length ? "" : "disabled"}><summary><span>${escapeHtml(label)}</span><strong>${rows.length}</strong></summary>${rows.length ? rows.slice(0, 60).map((issue) => `<button type="button" data-root-cc-action="open-location" data-site-id="${escapeHtml(issue.siteId)}"><span>${escapeHtml(issue.location)}</span><small>${escapeHtml(issue.label)}</small></button>`).join("") : `<div class="muted small">No items.</div>`}</details>`;
+  }).join("");
+}
+
+function renderRootCcNode54(){
+  const wrap = $("rootCcNode54Summary");
+  const button = document.querySelector('[data-root-cc-action="node54"]');
+  if (!wrap || !button) return;
+  const available = isNode54Project(state.activeProject);
+  button.disabled = !available;
+  if (!available){ wrap.innerHTML = `<div class="muted small">Select Ruidoso Revisit to launch the P0002 guided trace.</div>`; return; }
+  const statuses = buildBranchStatuses(state.node54Diagnostics.readings || []);
+  wrap.innerHTML = `<div class="root-cc-node54-grid">${Object.entries(statuses).map(([path, status]) => `<span><b>${escapeHtml(path)}</b>${escapeHtml(formatNode54Status(status))}</span>`).join("")}</div><div class="muted tiny">${state.node54Diagnostics.readings.length} current device-session reading${state.node54Diagnostics.readings.length === 1 ? "" : "s"}.</div>`;
+}
+
+function renderRootCcFieldBrief(){
+  const wrap = $("rootCcFieldBrief");
+  if (!wrap) return;
+  const brief = state.rootCommandCenter.fieldBrief;
+  if (!brief){ wrap.innerHTML = `<div class="muted small">Build a deterministic briefing from the evidence currently loaded.</div>`; return; }
+  wrap.innerHTML = `<h3>${escapeHtml(brief.headline)}</h3><ul>${brief.lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul><div class="root-cc-priority"><b>Highest-priority locations</b>${brief.priorityLocations.length ? brief.priorityLocations.map((location) => `<span>${escapeHtml(location)}</span>`).join("") : `<span>No priority locations derived.</span>`}</div><small>Generated from current project records; no AI service used.</small>`;
+}
+
+function renderRootCommandCenter(){
+  const view = $("viewRootCommandCenter");
+  if (!view) return;
+  const allowed = isEffectiveRootRole();
+  view.hidden = !allowed;
+  const notice = $("rootCcAccessNotice");
+  if (notice) notice.hidden = allowed;
+  if (!allowed) return;
+  const projectName = $("rootCcProjectName");
+  if (projectName) projectName.textContent = state.activeProject ? `${state.activeProject.name} · read-only project intelligence` : "Select an active project to begin the field audit.";
+  const loading = $("rootCcLoading");
+  if (loading) loading.hidden = !state.rootCommandCenter.loading;
+  const metrics = $("rootCcMetrics");
+  if (metrics) metrics.innerHTML = state.activeProject ? renderRootCcMetrics(state.rootCommandCenter.analysis) : `<div class="root-cc-empty">No active project selected.</div>`;
+  const filter = $("rootCcExceptionFilter");
+  if (filter) filter.value = state.rootCommandCenter.exceptionFilter;
+  renderRootCcExceptions();
+  renderRootCcSearchResults();
+  renderRootCcCleanup();
+  renderRootCcNode54();
+  renderRootCcFieldBrief();
+  if (state.rootCommandCenter.unavailable.length){
+    const metricsWrap = $("rootCcMetrics");
+    metricsWrap?.insertAdjacentHTML("beforeend", `<div class="root-cc-source-warning">Unavailable sources: ${escapeHtml(state.rootCommandCenter.unavailable.join(", "))}. Metrics exclude those sources.</div>`);
+  }
+}
+
+async function openRootCommandCenterLocation(siteId){
+  if (!isEffectiveRootRole() || !siteId) return;
+  setActiveView("viewMap");
+  ensureMap();
+  await openLocationForField(siteId, { center: true, forAdd: false });
+}
+
+function renderRootXrayLayer({ fit = false } = {}){
+  clearRootXrayLayer();
+  if (!state.rootCommandCenter.xrayEnabled || !isEffectiveRootRole() || !state.map.instance || !window.L) return;
+  const records = state.rootCommandCenter.analysis?.records || [];
+  const layer = window.L.layerGroup().addTo(state.map.instance);
+  state.rootCommandCenter.xrayLayer = layer;
+  const bounds = [];
+  records.forEach((record) => {
+    const coords = getSiteCoords(record.site);
+    if (!coords) return;
+    bounds.push([coords.lat, coords.lng]);
+    const color = ROOT_CC_XRAY_COLORS[record.level] || ROOT_CC_XRAY_COLORS.clear;
+    const marker = window.L.circleMarker([coords.lat, coords.lng], { radius: record.level === "critical" ? 14 : 11, color: "#f8fafc", fillColor: color, fillOpacity: 0.9, weight: 3, bubblingMouseEvents: false }).addTo(layer);
+    const reasons = record.issues.length ? record.issues.slice(0, 5).map((issue) => issue.label).join(" · ") : "No derived exception";
+    marker.bindTooltip(`<strong>${escapeHtml(record.site?.name || "Location")}</strong><br>${escapeHtml(record.level.toUpperCase())}<br>${escapeHtml(reasons)}`);
+    marker.on("click", () => void openRootCommandCenterLocation(record.siteId));
+  });
+  if (fit && bounds.length) state.map.instance.fitBounds(window.L.latLngBounds(bounds), { padding: [32, 32], maxZoom: 16 });
+}
+
+async function enableRootProjectXray(){
+  if (!isEffectiveRootRole()) return;
+  if (!state.activeProject?.id){ toast("Project required", "Select a project before opening Project X-Ray.", "error"); return; }
+  await loadRootCommandCenterData({ silent: true });
+  state.rootCommandCenter.xrayEnabled = true;
+  setActiveView("viewMap");
+  ensureMap();
+  renderRootXrayLayer({ fit: true });
+  renderMapFieldPanel();
+  toast("Project X-Ray active", "Red and amber locations need attention; blue items require review. No records were changed.");
+}
+
+function disableRootProjectXray(){
+  state.rootCommandCenter.xrayEnabled = false;
+  clearRootXrayLayer();
+  renderMapFieldPanel();
+}
+
+function renderRootProjectStatusCompact(){
+  const analysis = state.rootCommandCenter.analysis;
+  if (!analysis) return `<div class="muted small">Project intelligence is loading. Open Command Center for the full audit.</div>`;
+  const m = analysis.metrics;
+  const lastActivity = analysis.records.map((record) => record.lastActivity).filter(Boolean).sort((a, b) => Date.parse(b) - Date.parse(a))[0] || "";
+  return `<div class="root-map-status-grid"><div><span>Complete</span><strong>${m.completed}/${m.total}</strong></div><div><span>Return</span><strong>${m.needsReturn}</strong></div><div><span>Optical</span><strong>${m.opticalConcern}</strong></div><div><span>Evidence gaps</span><strong>${m.missingPhotosAfterWork}</strong></div></div><div class="root-map-last-activity"><span>Last recorded activity</span><strong>${escapeHtml(formatMasterSearchDate(lastActivity))}</strong></div>${state.rootCommandCenter.xrayEnabled ? `<div class="root-xray-map-legend" aria-label="Project X-Ray legend"><span><i class="critical"></i>Critical</span><span><i class="attention"></i>Attention</span><span><i class="review"></i>Review</span><span><i class="clear"></i>Clear</span></div><button class="btn danger small wide" type="button" data-map-field-action="rootXrayOff">EXIT PROJECT X-RAY</button>` : ""}`;
+}
+
 function renderRootMapAdminControls(){
   const projectName = state.activeProject?.name || "No project selected";
   return `
     <section class="map-root-admin-card" aria-labelledby="mapRootAdminTitle">
       <div class="map-field-card-kicker">ROOT Map Administration</div>
       <div id="mapRootAdminTitle" class="map-root-admin-title">${escapeHtml(projectName)}</div>
-      <div class="muted small">Manage map data, users, projects, reporting, and billing.</div>
+      <div class="muted small">Inspect, troubleshoot, clean up, and administer without starting a field-worker day.</div>
+      ${renderRootProjectStatusCompact()}
       ${renderNode54EntryAction()}
       <div class="map-field-search-row">
         <input id="mapRootMasterSearch" class="input compact" type="search" placeholder="Master search: 1702" aria-label="Master location search" />
         <button class="btn secondary small" type="button" data-map-field-action="rootMasterSearch">Search All</button>
       </div>
       <div class="map-root-admin-grid">
+        <button class="btn root-cc-q-button small" type="button" data-map-field-action="rootOpenView" data-root-view="viewRootCommandCenter">Command Center</button>
+        <button class="btn secondary small" type="button" data-map-field-action="rootXrayOn">Project X-Ray</button>
         <button class="btn secondary small" type="button" data-map-field-action="rootOpenView" data-root-view="viewAdmin">Administration</button>
         <button class="btn secondary small" type="button" data-map-field-action="rootOpenProjects">Projects</button>
         <button class="btn secondary small" type="button" data-map-field-action="rootOpenView" data-root-view="viewDailyReport">Reports</button>
@@ -28562,10 +28855,12 @@ async function loadProjectSites(projectId){
     updateMapMarkers(resultSet.rows);
     renderDerivedMapLayers(resultSet.rows);
     if (state.node54Diagnostics.enabled) renderNode54MapOverlay();
+    if (state.rootCommandCenter.xrayEnabled) renderRootXrayLayer();
     // Do NOT call syncMapToSearchResults here — that runs fitBounds across all
     // project sites and zooms the map way out on every background refresh.
     // syncMapToSearchResults is for explicit user searches only.
   }
+  if (isEffectiveRootRole()) void loadRootCommandCenterData({ silent: true, force: true });
 }
 
 function getNextSiteName(){
@@ -30461,12 +30756,15 @@ function setActiveProjectById(id){
   const nextProjectId = String(next?.id || "");
   const openFieldDay = getOpenFieldDaySession();
   const openFieldDayProjectId = openFieldDay ? (openFieldDay.project_id || currentProjectId) : null;
-  if (currentProjectId !== nextProjectId && !canSwitchFieldProject(openFieldDayProjectId, nextProjectId)){
+  if (currentProjectId !== nextProjectId && !isEffectiveRootRole() && !canSwitchFieldProject(openFieldDayProjectId, nextProjectId)){
     toast("End active project day", `End the recorded project day for ${state.activeProject?.name || "the current project"} before switching projects.`, "error");
     return false;
   }
   if (currentProjectId !== nextProjectId && state.node54Diagnostics.enabled){
     deactivateNode54Diagnostics({ render: false });
+  }
+  if (currentProjectId !== nextProjectId){
+    resetRootCommandCenterProject();
   }
   state.activeProject = next;
   if (currentProjectId !== nextProjectId){
@@ -39004,6 +39302,55 @@ function wireUI(){
     });
   }
   setMessagesFilter(state.messageFilter);
+  const rootCommandCenterView = $("viewRootCommandCenter");
+  if (rootCommandCenterView){
+    rootCommandCenterView.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-root-cc-action]");
+      if (!button || !isEffectiveRootRole()) return;
+      const action = String(button.dataset.rootCcAction || "");
+      if (action === "refresh"){
+        await loadRootCommandCenterData({ force: true, silent: false });
+      } else if (action === "open-map"){
+        setActiveView("viewMap");
+      } else if (action === "open-location"){
+        await openRootCommandCenterLocation(button.dataset.siteId || "");
+      } else if (action === "next-exception"){
+        const issue = getRootCcFilteredIssues()[0];
+        if (issue) await openRootCommandCenterLocation(issue.siteId);
+        else toast("Queue clear", "No exception matches the selected filter.");
+      } else if (action === "search"){
+        state.rootCommandCenter.searchTerm = String($("rootCcSearchInput")?.value || "").trim();
+        renderRootCcSearchResults();
+      } else if (action === "xray"){
+        await enableRootProjectXray();
+      } else if (action === "node54"){
+        if (!isNode54Project(state.activeProject)){
+          toast("Ruidoso Revisit required", "Select Ruidoso Revisit to launch Node 54 Diagnostics.", "error");
+          return;
+        }
+        setActiveView("viewMap");
+        activateNode54Diagnostics();
+      } else if (action === "brief"){
+        if (!state.rootCommandCenter.analysis){
+          await loadRootCommandCenterData({ silent: true });
+        }
+        state.rootCommandCenter.fieldBrief = buildRootFieldBrief(state.rootCommandCenter.analysis);
+        renderRootCcFieldBrief();
+      }
+    });
+    $("rootCcExceptionFilter")?.addEventListener("change", (event) => {
+      if (!isEffectiveRootRole()) return;
+      state.rootCommandCenter.exceptionFilter = String(event.target.value || "all");
+      renderRootCcExceptions();
+    });
+    $("rootCcSearchInput")?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || !isEffectiveRootRole()) return;
+      event.preventDefault();
+      state.rootCommandCenter.searchTerm = String(event.target.value || "").trim();
+      renderRootCcSearchResults();
+    });
+  }
+
   const menuBtn = $("btnMenu");
   const togglePlacesDrawer = () => {
     if (!isMapViewActive()){
@@ -39411,6 +39758,14 @@ function wireUI(){
         }
         if (action === "rootImportLocations"){
           if (isEffectiveRootRole()) await handleLocationImport(null);
+          return;
+        }
+        if (action === "rootXrayOn"){
+          await enableRootProjectXray();
+          return;
+        }
+        if (action === "rootXrayOff"){
+          if (isEffectiveRootRole()) disableRootProjectXray();
           return;
         }
         if (action === "node54Start"){
