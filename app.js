@@ -597,6 +597,10 @@ function isEffectiveRootRole(){
   return typeof authoritativeRootCheck === "function" && authoritativeRootCheck();
 }
 
+function bypassesFieldDayWorkflow(){
+  return isEffectiveRootRole();
+}
+
 function canUseMasterLocationSearch(){
   if (isBreakGlassUser()) return true;
   return ["ROOT", "ADMIN"].includes(String(getRoleCode() || "").toUpperCase());
@@ -12692,6 +12696,7 @@ function isViewAllowed(viewId){
   if (isFieldSubcontractorMode()){
     return FIELD_SUBCONTRACTOR_ALLOWED_VIEWS.has(viewId);
   }
+  if (viewId === "viewTechnician" && bypassesFieldDayWorkflow()) return false;
   if (viewId === "viewRootCommandCenter") return isEffectiveRootRole();
   if (isDemoShowcaseMode()){
     return true;
@@ -25350,7 +25355,7 @@ function setFieldDayState(session, events = []){
 }
 
 async function loadFieldDaySession({ silent = true } = {}){
-  if (isEffectiveRootRole()){
+  if (bypassesFieldDayWorkflow()){
     setFieldDayState(null, []);
     renderMapFieldPanel();
     return null;
@@ -25453,7 +25458,7 @@ async function saveFieldDayAcceptance(sessionId, acceptedAt){
 }
 
 async function startFieldDay(){
-  if (isEffectiveRootRole()) return;
+  if (bypassesFieldDayWorkflow()) return;
   if (!state.activeProject?.id){
     toast("Project required", "Select a project before starting the day.");
     return;
@@ -25510,7 +25515,7 @@ async function startFieldDay(){
 }
 
 async function startFieldDayEvent(eventType, { siteId = null, label: requestedLabel = "" } = {}){
-  if (isEffectiveRootRole()) return;
+  if (bypassesFieldDayWorkflow()) return;
   const session = getOpenFieldDaySession();
   if (!session){
     toast("Start project day", "Tap Start Project Day before logging activities.");
@@ -25563,6 +25568,7 @@ async function startFieldDayEvent(eventType, { siteId = null, label: requestedLa
 }
 
 async function endFieldDayEvent({ eventId = state.fieldDay.activeEvent?.id, notes = null, workCodes = null, materialsUsed = null, endedAt = nowISO(), toastLabel = "" } = {}){
+  if (bypassesFieldDayWorkflow()) return null;
   const event = (state.fieldDay.events || []).find((row) => row.id === eventId) || state.fieldDay.activeEvent || null;
   if (!event || event.ended_at){
     toast("No active item", "There is no active project-day item to end.");
@@ -25600,6 +25606,7 @@ async function endFieldDayEvent({ eventId = state.fieldDay.activeEvent?.id, note
 }
 
 async function finalizeFieldDayLocation(siteId){
+  if (bypassesFieldDayWorkflow()) return;
   const active = state.fieldDay.activeEvent || null;
   const site = getVisibleSiteByIdKey(siteId);
   if (!site || !active || active.event_type !== FIELD_DAY_EVENT_TYPES.LOCATION_WORK || toSiteIdKey(active.site_id) !== toSiteIdKey(siteId)){
@@ -25620,6 +25627,7 @@ async function finalizeFieldDayLocation(siteId){
 }
 
 async function endFieldDayLocation(siteId, { closeout = null } = {}){
+  if (bypassesFieldDayWorkflow()) return;
   const active = state.fieldDay.activeEvent || null;
   if (!active || active.event_type !== FIELD_DAY_EVENT_TYPES.LOCATION_WORK || toSiteIdKey(active.site_id) !== toSiteIdKey(siteId)){
     toast("Location not active", "Start this location before ending it.");
@@ -25670,6 +25678,7 @@ async function endFieldDayLocation(siteId, { closeout = null } = {}){
 }
 
 async function endFieldDay(){
+  if (bypassesFieldDayWorkflow()) return;
   const session = getOpenFieldDaySession();
   if (!session){
     toast("Project day", "No active project day to end.");
@@ -25788,7 +25797,7 @@ function getFieldDayGuidance(selectedSite){
 }
 
 function renderFieldDayControls(gps, nearest, selectedSite){
-  if (isEffectiveRootRole()) return "";
+  if (bypassesFieldDayWorkflow()) return "";
   if (!state.activeProject?.id) return "";
   const session = state.fieldDay.session || null;
   const active = state.fieldDay.activeEvent || null;
@@ -25900,7 +25909,7 @@ function renderTodayWorklistCard(selectedSite){
 }
 
 function renderFieldDayLocationControls(site){
-  if (isEffectiveRootRole()) return "";
+  if (bypassesFieldDayWorkflow()) return "";
   if (!site?.id) return "";
   const session = state.fieldDay.session || null;
   const active = state.fieldDay.activeEvent || null;
@@ -26135,7 +26144,7 @@ function renderActiveFieldVisitCard(site, draft, active){
 }
 
 function renderFieldBreakLunchCard(){
-  if (isEffectiveRootRole()) return "";
+  if (bypassesFieldDayWorkflow()) return "";
   if (!state.activeProject?.id) return "";
   const session = state.fieldDay.session || null;
   const activeType = getActiveFieldDayEventType();
@@ -26161,7 +26170,7 @@ function renderFieldBreakLunchCard(){
 }
 
 function renderFieldDayEndCard(){
-  if (isEffectiveRootRole()) return "";
+  if (bypassesFieldDayWorkflow()) return "";
   if (!state.activeProject?.id) return "";
   const session = state.fieldDay.session || null;
   const activeType = getActiveFieldDayEventType();
@@ -27089,7 +27098,7 @@ function renderMapFieldPanel(){
   const card = $("mapFieldLocationCard");
   const tailActions = $("mapFieldDayTailActions");
   if (!panel || !gpsState || !actionsWrap || !createWrap || !card || !tailActions) return;
-  const isRoot = isEffectiveRootRole();
+  const isRoot = bypassesFieldDayWorkflow();
   const createOpen = Boolean(state.map.fieldCreateOpen);
   if (state.node54Diagnostics.enabled){
     panel.hidden = false;
@@ -28271,6 +28280,7 @@ function getFieldGpsAssociationRadius(gps){
 }
 
 async function recordFieldLocationPingFromGps(gps, { nearest = null, source = "truck_gps" } = {}){
+  if (bypassesFieldDayWorkflow()) return null;
   if (isDemo || isDemoUser() || !state.client || !state.user || !gps) return null;
   if (!getOpenFieldDaySession()) return null;
   const projectId = state.activeProject?.id || state.technician.timesheet?.project_id || null;
@@ -28314,6 +28324,7 @@ async function recordFieldLocationPingFromGps(gps, { nearest = null, source = "t
 }
 
 async function uploadMapFieldVisitPhotos(siteId, proofType = "visit_issue"){
+  if (bypassesFieldDayWorkflow()) return;
   const site = getVisibleSiteByIdKey(siteId);
   if (!site){
     toast("Location missing", "Select a saved location before uploading photos.");
@@ -28370,6 +28381,7 @@ async function uploadMapFieldVisitPhotos(siteId, proofType = "visit_issue"){
 }
 
 async function saveMapFieldWorkLog(siteId, { allowEmpty = false, startedAt = null, completedAt = null, silent = false, notesOverride = null, codesOverride = null, materialsOverride = null } = {}){
+  if (bypassesFieldDayWorkflow()) return null;
   const site = getVisibleSiteByIdKey(siteId);
   if (!site){
     toast("Location missing", "This location is not available.", "error");
@@ -30756,7 +30768,7 @@ function setActiveProjectById(id){
   const nextProjectId = String(next?.id || "");
   const openFieldDay = getOpenFieldDaySession();
   const openFieldDayProjectId = openFieldDay ? (openFieldDay.project_id || currentProjectId) : null;
-  if (currentProjectId !== nextProjectId && !isEffectiveRootRole() && !canSwitchFieldProject(openFieldDayProjectId, nextProjectId)){
+  if (currentProjectId !== nextProjectId && !bypassesFieldDayWorkflow() && !canSwitchFieldProject(openFieldDayProjectId, nextProjectId)){
     toast("End active project day", `End the recorded project day for ${state.activeProject?.name || "the current project"} before switching projects.`, "error");
     return false;
   }
