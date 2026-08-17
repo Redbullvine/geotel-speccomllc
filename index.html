@@ -2108,15 +2108,10 @@
   <div class="speccom-bg" aria-hidden="true"></div>
   <div class="app-container">
   <nav id="main-navbar">
-    <img
-      src="assets/speccom_logo_2.png"
-      alt="SpecCom"
-      class="nav-logo-img"
-    />
+    <button id="btnMenu" class="nav-hamburger" type="button" aria-label="Open menu" title="Menu">
+      <span></span><span></span><span></span>
+    </button>
     <div class="nav-tools">
-      <button id="btnMenu" class="nav-hamburger" type="button" aria-label="Open menu" title="Menu">
-        <span></span><span></span><span></span>
-      </button>
       <button class="nav-util" id="theme-toggle-btn" title="Toggle light / dark mode" type="button">
         <svg id="theme-icon-dark" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
           <path d="M13.5 9A5.5 5.5 0 0 1 7 2.5a5.5 5.5 0 1 0 6.5 6.5z"/>
@@ -2143,6 +2138,13 @@
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
           <path d="M2 12L6 8L9 11L14 4"/>
           <circle cx="14" cy="4" r="1.5" fill="currentColor" stroke="none"/>
+        </svg>
+      </button>
+      <button class="nav-util" id="nav-master-search-btn" title="Master location search" type="button" style="display:none;">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="7" cy="7" r="4.5"/>
+          <line x1="10.5" y1="10.5" x2="14" y2="14"/>
+          <path d="M4.5 7h5M7 4.5v5"/>
         </svg>
       </button>
       <button class="nav-util" id="nav-splice-btn" title="Add Splice" type="button">
@@ -2174,6 +2176,11 @@
       <span id="pendingUploadsCount" class="badge" style="display:none; position:absolute; top:-4px; right:-4px; background:#ff6b6b; color:white; font-size:10px; padding:2px 5px; border-radius:9px; font-weight:700;">0</span>
     </div>
     <span id="saveStatusBadge"></span>
+    <img
+      src="assets/speccom_logo_2.png"
+      alt="SpecCom"
+      class="nav-logo-img nav-logo-right"
+    />
   </nav>
   <div class="page container">
     <div class="spacer"></div>
@@ -2774,6 +2781,80 @@
           </div>
         </section>
 
+        <section id="viewRootCommandCenter" class="view root-command-center" aria-labelledby="rootCommandCenterTitle">
+          <div class="root-cc-header">
+            <div>
+              <div class="root-cc-eyebrow">ROOT · OSP PROJECT CONTROL</div>
+              <h1 id="rootCommandCenterTitle">ROOT Command Center</h1>
+              <div id="rootCcProjectName" class="muted">Select an active project to begin the field audit.</div>
+            </div>
+            <div class="root-cc-header-actions">
+              <button class="btn secondary" type="button" data-root-cc-action="refresh">Refresh Intelligence</button>
+              <button class="btn ghost" type="button" data-root-cc-action="open-map">Open Map</button>
+            </div>
+          </div>
+
+          <div id="rootCcAccessNotice" class="root-cc-access-notice" hidden>ROOT authorization is required.</div>
+          <div id="rootCcLoading" class="root-cc-loading" hidden>Reading active-project evidence…</div>
+
+          <section class="root-cc-section">
+            <div class="root-cc-section-title"><div><span>01</span><h2>Project Overview</h2></div><small>Live and derived metrics are labeled separately.</small></div>
+            <div id="rootCcMetrics" class="root-cc-metrics"></div>
+          </section>
+
+          <div class="root-cc-layout">
+            <section class="root-cc-section root-cc-primary-panel">
+              <div class="root-cc-section-title"><div><span>02</span><h2>Trouble Radar</h2></div><small>Read-only exceptions</small></div>
+              <div class="root-cc-toolbar">
+                <select id="rootCcExceptionFilter" class="input compact" aria-label="Filter exceptions">
+                  <option value="all">All exceptions</option>
+                  <option value="critical">Critical</option>
+                  <option value="attention">Needs attention</option>
+                  <option value="review">Review</option>
+                </select>
+                <button class="btn secondary small" type="button" data-root-cc-action="next-exception">Open Next</button>
+              </div>
+              <div id="rootCcExceptions" class="root-cc-exceptions"></div>
+            </section>
+
+            <aside class="root-cc-side-stack">
+              <section class="root-cc-section root-cc-search-card">
+                <div class="root-cc-section-title"><div><span>03</span><h2>Project Search</h2></div></div>
+                <div class="root-cc-search-row">
+                  <input id="rootCcSearchInput" class="input" type="search" placeholder="NP, CP, F35, PON, cable, notes…" />
+                  <button class="btn secondary" type="button" data-root-cc-action="search">Search</button>
+                </div>
+                <div id="rootCcSearchResults" class="root-cc-search-results"><div class="muted small">Search the active project only.</div></div>
+              </section>
+
+              <section class="root-cc-section root-cc-qtool-card">
+                <div class="root-cc-q-badge">Q TOOL</div>
+                <h2>Project X-Ray</h2>
+                <p>Reveal evidence gaps and trouble severity directly on the project map without changing a record.</p>
+                <button class="btn root-cc-q-button" type="button" data-root-cc-action="xray">SHOW PROJECT X-RAY</button>
+              </section>
+
+              <section class="root-cc-section">
+                <div class="root-cc-section-title"><div><span>04</span><h2>Node 54</h2></div></div>
+                <div id="rootCcNode54Summary" class="root-cc-node54-summary"></div>
+                <button class="btn node54-primary" type="button" data-root-cc-action="node54">NODE 54 DIAGNOSTICS</button>
+              </section>
+            </aside>
+          </div>
+
+          <div class="root-cc-layout root-cc-lower-layout">
+            <section class="root-cc-section">
+              <div class="root-cc-section-title"><div><span>05</span><h2>Cleanup Queue</h2></div><small>No automatic edits</small></div>
+              <div id="rootCcCleanup" class="root-cc-cleanup"></div>
+            </section>
+            <section class="root-cc-section">
+              <div class="root-cc-section-title"><div><span>06</span><h2>Field Brief</h2></div></div>
+              <button class="btn secondary" type="button" data-root-cc-action="brief">BUILD FIELD BRIEF</button>
+              <div id="rootCcFieldBrief" class="root-cc-field-brief"><div class="muted small">Build a deterministic briefing from the evidence currently loaded.</div></div>
+            </section>
+          </div>
+        </section>
+
         <section id="viewLabor" class="view">
           <div class="card">
             <div class="row" style="justify-content:space-between;">
@@ -2920,6 +3001,7 @@
                       <div class="sidebar-title">Places</div>
                       <div class="sidebar-header-actions">
                         <button id="btnPlacesHide" class="btn ghost small" type="button">Close</button>
+                        <button id="btnMapManageCreateLocation" class="btn ghost small" type="button">Create Location</button>
                         <button id="btnImportLocations" class="btn ghost small" type="button">Import KMZ / KML / ZIP / CSV / PDF</button>
                         <input id="importLocationsInput" type="file" accept=".kmz,.kml,.zip,.csv,.pdf,application/vnd.google-earth.kmz,application/vnd.google-earth.kml+xml,application/zip,text/csv,application/pdf" style="display:none;" />
                       </div>
@@ -3263,6 +3345,40 @@
         <section id="viewDailyReport" class="view">
           <div class="card">
             <h1 data-i18n="dailyReportTitle">Daily Report</h1>
+            <section class="dpr-user-search-panel dpr-project-search-panel" aria-labelledby="dprProjectSearchTitle">
+              <div>
+                <h2 id="dprProjectSearchTitle">Project report search</h2>
+                <div class="muted small">Search one project across a From/Through date range.</div>
+              </div>
+              <div class="dpr-user-search-controls">
+                <div class="field-stack dpr-user-field">
+                  <label class="muted small" data-i18n="dprProjectLabel" for="dprProjectSelect">Project</label>
+                  <select id="dprProjectSelect" class="input">
+                    <option value="" data-i18n="selectProject">Select project</option>
+                  </select>
+                </div>
+                <div class="field-stack">
+                  <label class="muted small" for="dprDateFrom">From</label>
+                  <input id="dprDateFrom" class="input" type="date" />
+                </div>
+                <div class="field-stack">
+                  <label class="muted small" for="dprDateTo">Through</label>
+                  <input id="dprDateTo" class="input" type="date" />
+                </div>
+                <button id="btnDprRefresh" class="btn secondary" type="button">Search / Refresh</button>
+              </div>
+              <div id="dprMetrics" class="dpr-metrics"></div>
+              <div class="field-stack dpr-single-day-editor">
+                <div id="dprRangeNote" class="muted small"></div>
+                <label class="muted small" data-i18n="dprCommentsLabel">Comments / Needs Addressed</label>
+                <textarea id="dprComments" class="input" rows="4" data-i18n-placeholder="dprCommentsPlaceholder" placeholder="Anything needs addressed?"></textarea>
+                <div class="row">
+                  <button id="btnDprGenerate" class="btn secondary" type="button">Generate selected day</button>
+                  <button id="btnDprSave" class="btn" type="button" data-i18n="saveLabel">Save</button>
+                </div>
+                <div id="dprNote" class="muted small"></div>
+              </div>
+            </section>
             <section class="dpr-user-search-panel" aria-labelledby="dprUserSearchTitle">
               <div>
                 <h2 id="dprUserSearchTitle">User activity</h2>
@@ -3290,28 +3406,6 @@
                 <div class="muted small">Choose a user and date range to see their daily activity.</div>
               </div>
             </section>
-            <div class="dpr-project-report-heading">
-              <h2>Project daily report</h2>
-              <div class="muted small">Generate and save the report for one project and date.</div>
-            </div>
-            <div class="field-stack">
-              <label class="muted small" data-i18n="dprProjectLabel">Project</label>
-              <select id="dprProjectSelect" class="input">
-                <option value="" data-i18n="selectProject">Select project</option>
-              </select>
-              <label class="muted small" data-i18n="dprDateLabel">Report date</label>
-              <input id="dprDate" class="input" type="date" />
-              <div class="row">
-                <button id="btnDprRefresh" class="btn secondary" type="button" data-i18n="dprRefresh">Generate / Refresh</button>
-              </div>
-              <div id="dprMetrics" class="dpr-metrics"></div>
-              <label class="muted small" data-i18n="dprCommentsLabel">Comments / Needs Addressed</label>
-              <textarea id="dprComments" class="input" rows="4" data-i18n-placeholder="dprCommentsPlaceholder" placeholder="Anything needs addressed?"></textarea>
-              <div class="row">
-                <button id="btnDprSave" class="btn" type="button" data-i18n="saveLabel">Save</button>
-              </div>
-              <div id="dprNote" class="muted small"></div>
-            </div>
           </div>
         </section>
       </main>
@@ -3470,6 +3564,10 @@
         </div>
         <div class="menu-section">
           <div class="muted small menu-title">Navigation</div>
+          <button id="btnMenuRootCommandCenter" class="menu-link root-only-control" type="button" data-view="viewRootCommandCenter" style="display:none;">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 11V6l5-4 5 4v5"/><path d="M4.5 11V8h5v3"/><circle cx="7" cy="5.5" r="1"/></svg>
+            ROOT Command Center
+          </button>
           <button class="menu-link" type="button" data-view="viewMap">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="5.5"/><path d="M7 4v3l2 1.5"/></svg>
             Home
@@ -3688,6 +3786,24 @@
           <button id="btnGrantAccessCancel" class="btn ghost" type="button">Cancel</button>
           <button id="btnGrantAccessConfirm" class="btn" type="button">Grant Access</button>
         </div>
+      </div>
+    </div>
+
+    <div id="masterLocationSearchModal" class="modal" style="display:none;">
+      <div class="card modal-card master-location-search-modal" role="dialog" aria-modal="true" aria-labelledby="masterLocationSearchTitle">
+        <div class="modal-header">
+          <div>
+            <h2 id="masterLocationSearchTitle">Master Location Search</h2>
+            <div class="muted small">Search every accessible project for a location or network-point number.</div>
+          </div>
+          <button id="btnMasterLocationSearchClose" class="btn ghost small" type="button">Close</button>
+        </div>
+        <form id="masterLocationSearchForm" class="master-location-search-form" autocomplete="off">
+          <input id="masterLocationSearchInput" class="input" type="search" placeholder="Example: 1702 or RuidosoNetworkPoint-1702" aria-label="Location or network-point number" />
+          <button id="btnMasterLocationSearchRun" class="btn secondary" type="submit">Search All Projects</button>
+        </form>
+        <div id="masterLocationSearchStatus" class="muted small" aria-live="polite">Enter at least two characters.</div>
+        <div id="masterLocationSearchResults" class="master-location-search-results"></div>
       </div>
     </div>
 
