@@ -26,12 +26,15 @@ import {
 } from "./services/fieldVisitEvidence.mjs";
 import {
   assessComponentPair,
+  assessNode54Device,
   buildBranchStatuses,
   isNode54Project,
   NODE54_HISTORY,
+  NODE54_IMPORTED_EVIDENCE,
   NODE54_SCHEMATIC_SEGMENTS,
   NODE54_STATUS,
   NODE54_STOPS,
+  NODE54_TAP_RATIO_ESTIMATES,
   NODE54_THRESHOLDS,
 } from "./services/node54Diagnostics.mjs";
 import {
@@ -463,6 +466,7 @@ const state = {
     currentStopId: "cp13817",
     currentStepIndex: 0,
     readings: [],
+    deviceChecks: [],
     suggestedStopId: "",
     layer: null,
     pendingPhoto: null,
@@ -478,6 +482,7 @@ const state = {
     xrayEnabled: false,
     xrayLayer: null,
     fieldBrief: null,
+    workerNames: {},
   },
   pinOverview: {
     open: false,
@@ -26487,6 +26492,7 @@ function createNode54Session(projectId){
     currentStopId: "cp13817",
     currentStepIndex: 0,
     readings: [],
+    deviceChecks: [],
     suggestedStopId: "",
   };
 }
@@ -26501,6 +26507,7 @@ function loadNode54Session(projectId){
   state.node54Diagnostics.currentStopId = NODE54_STOPS.some((stop) => stop.id === base.currentStopId) ? base.currentStopId : "cp13817";
   state.node54Diagnostics.currentStepIndex = Math.max(0, Number(base.currentStepIndex) || 0);
   state.node54Diagnostics.readings = Array.isArray(base.readings) ? base.readings : [];
+  state.node54Diagnostics.deviceChecks = Array.isArray(base.deviceChecks) ? base.deviceChecks : [];
   state.node54Diagnostics.suggestedStopId = String(base.suggestedStopId || "");
   state.node54Diagnostics.pendingPhoto = null;
   persistNode54Session();
@@ -26516,6 +26523,7 @@ function persistNode54Session(){
     currentStopId: diag.currentStopId,
     currentStepIndex: diag.currentStepIndex,
     readings: diag.readings,
+    deviceChecks: diag.deviceChecks,
     suggestedStopId: diag.suggestedStopId,
   }));
 }
@@ -26566,10 +26574,12 @@ function findNode54Site(stop){
 function getNode54StopStatus(stop, statuses){
   if (stop.id === state.node54Diagnostics.currentStopId) return "current";
   const paths = [...new Set(stop.steps.map((item) => item.path).filter(Boolean))];
+  const hasStopHistory = [...new Set(stop.steps.flatMap((item) => getNode54HistoryForPath(item.path)))].some((line) => line.includes(`NP${stop.np}`) || line.includes(`NP${stop.cp}`)) || Boolean(NODE54_IMPORTED_EVIDENCE[stop.np]?.length);
   if (paths.some((path) => statuses[path] === NODE54_STATUS.ISOLATED)) return "isolated";
   if (paths.length && paths.every((path) => [NODE54_STATUS.CLEARED, NODE54_STATUS.REVERIFIED].includes(statuses[path]))) return "cleared";
   if (paths.some((path) => statuses[path] === NODE54_STATUS.HISTORICAL_WEAK)) return "historical_weak";
   if (paths.some((path) => [NODE54_STATUS.INVESTIGATING, NODE54_STATUS.REVERIFIED].includes(statuses[path]))) return "investigating";
+  if (hasStopHistory) return "historical_good";
   if (paths.some((path) => statuses[path] === NODE54_STATUS.HISTORICAL_GOOD)) return "historical_good";
   return "untested";
 }
@@ -26608,7 +26618,12 @@ function renderNode54MapOverlay({ fit = false } = {}){
     if (!from || !to) return;
     window.L.polyline([[from.lat, from.lng], [to.lat, to.lng]], {
       color: segment.color, weight: 4, opacity: 0.78, dashArray: "9 7", interactive: true,
-    }).bindTooltip(`<strong>${escapeHtml(segment.paths)}</strong><br><span>Schematic relationship — not surveyed route</span>`, { sticky: true }).addTo(layer);
+    }).bindTooltip(`<strong>${escapeHtml(segment.paths)}</strong><br><span>Signal direction: ${escapeHtml(segment.from)} → ${escapeHtml(segment.to)}<br>Schematic relationship — not surveyed route</span>`, { sticky: true }).addTo(layer);
+    const directionDegrees = Math.atan2(to.lat - from.lat, to.lng - from.lng) * 180 / Math.PI;
+    window.L.marker([(from.lat + to.lat) / 2, (from.lng + to.lng) / 2], {
+      interactive: false,
+      icon: window.L.divIcon({ className: "node54-route-arrow", html: `<span style="--node54-route-color:${escapeHtml(segment.color)};--node54-route-angle:${directionDegrees}deg">➜</span>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
+    }).addTo(layer);
   });
   NODE54_STOPS.forEach((stop) => {
     const coords = coordsByStop.get(stop.id);
@@ -26620,7 +26635,10 @@ function renderNode54MapOverlay({ fit = false } = {}){
       fillColor: NODE54_MARKER_COLORS[status], fillOpacity: 0.96, weight: status === "current" ? 4 : 3,
       bubblingMouseEvents: false,
     }).addTo(layer);
-    marker.bindTooltip(`<strong>STOP ${stop.number}: ${escapeHtml(stop.title)}</strong><br>${escapeHtml(status.replaceAll("_", " "))}`);
+    const paths = [...new Set(stop.steps.map((item) => `${item.path}${item.fiber ? ` / ${item.fiber}` : ""}`))].join(" · ");
+    const expected = stop.expectedRatio ? `<br>Design ratio: ${escapeHtml(stop.expectedRatio)}` : "";
+    const historical = stop.steps.find((item) => item.reference !== null)?.reference;
+    marker.bindTooltip(`<strong>STOP ${stop.number}: ${escapeHtml(stop.title)}</strong><br>${escapeHtml(paths)}${expected}<br>Historical: ${historical === undefined ? "None listed" : `${Number(historical).toFixed(2)} dBm`}<br>Status: ${escapeHtml(status.replaceAll("_", " "))}`);
     marker.on("click", () => selectNode54Stop(stop.id, { focus: false }));
   });
   if (fit && bounds.length) state.map.instance.fitBounds(window.L.latLngBounds(bounds), { padding: [38, 38], maxZoom: 15 });
@@ -26691,6 +26709,66 @@ function getNode54LatestReading(stepId){
   return [...state.node54Diagnostics.readings].reverse().find((reading) => reading.stepId === stepId) || null;
 }
 
+function getNode54LatestDeviceCheck(stopId){
+  return [...(state.node54Diagnostics.deviceChecks || [])].reverse().find((check) => check.stopId === stopId) || null;
+}
+
+function getNode54StopNeighbors(stopId){
+  const incoming = NODE54_SCHEMATIC_SEGMENTS.find((segment) => segment.to === stopId);
+  const outgoing = NODE54_SCHEMATIC_SEGMENTS.find((segment) => segment.from === stopId);
+  return { upstreamId: incoming?.from || "", downstreamId: outgoing?.to || "" };
+}
+
+function getNode54EvidenceRecord(stop){
+  const records = state.rootCommandCenter.analysis?.records || [];
+  const site = findNode54Site(stop);
+  if (site?.id) return records.find((record) => String(record.siteId) === String(site.id)) || null;
+  const terms = stop?.siteTerms || [];
+  return records.find((record) => terms.some((term) => String(record.site?.name || "").toLowerCase().includes(String(term).toLowerCase()))) || null;
+}
+
+function getNode54DistanceMeters(stop){
+  const current = state.map.myLocation;
+  const coords = getSiteCoords(findNode54Site(stop));
+  if (!current || !coords) return null;
+  const toRad = (value) => Number(value) * Math.PI / 180;
+  const lat1 = toRad(current.lat), lat2 = toRad(coords.lat);
+  const dLat = lat2 - lat1, dLng = toRad(coords.lng) - toRad(current.lng);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function renderNode54PreviousEvidence(stop){
+  const record = getNode54EvidenceRecord(stop);
+  const pathHistory = [...new Set(stop.steps.flatMap((stepItem) => getNode54HistoryForPath(stepItem.path)))].filter((line) => line.includes(`NP${stop.np}`) || line.includes(`NP${stop.cp}`));
+  const workerName = (id) => state.rootCommandCenter.workerNames?.[String(id)] || (id ? `Unattributed historical user ${String(id).slice(0, 8)}` : "Unattributed historical record");
+  const rows = [
+    ...pathHistory.map((line) => ({ title: "Historical optical record", detail: line, meta: "Diagnostic workbook / historical reference" })),
+    ...(NODE54_IMPORTED_EVIDENCE[stop.np] || []).map((item) => ({ title: item.technician || "Unattributed historical record", detail: `${item.photos || 0} field photo${item.photos === 1 ? "" : "s"}${item.note ? ` - ${item.note}` : ""}`, meta: `Imported RUIDOSO photo report - ${item.date || "date unavailable"}` })),
+    ...(record?.codes || []).map((row) => ({ title: "Imported production code", detail: row.code || "Code", meta: `site_codes${row.created_at ? ` - ${new Date(row.created_at).toLocaleString()}` : ""}` })),
+    ...(record?.workLogs || []).map((row) => ({ title: workerName(row.user_id), detail: row.work_completed || row.status_after || "Field work record", meta: `field_work_logs - ${row.completed_at || row.created_at || "time unavailable"}` })),
+    ...(record?.closeouts || []).map((row) => ({ title: workerName(row.user_id), detail: row.visit_label || row.checklist?.final_status || "Closeout record", meta: `splicer_location_closeout_checklists - ${row.submitted_at || row.created_at || "time unavailable"}` })),
+    ...(record?.media || []).map((row) => ({ title: "Historical photo", detail: row.media_path || "Photo evidence", meta: `site_media - ${row.created_at || "time unavailable"}` })),
+  ];
+  const local = (state.node54Diagnostics.deviceChecks || []).filter((check) => check.stopId === stop.id).slice().reverse();
+  return `<details class="node54-history node54-evidence-history"><summary>Previous Field Evidence (${rows.length + local.length})</summary><div class="node54-evidence-source">Records are appended and never replace historical evidence. Missing worker identity is shown as unattributed.</div>${rows.length ? rows.map((row) => `<div class="node54-history-row"><b>${escapeHtml(row.title)}</b><span>${escapeHtml(row.detail)}</span><small>${escapeHtml(row.meta)}</small></div>`).join("") : `<div class="muted small">No linked site evidence was available for this staking point.</div>`}${local.map((check) => `<div class="node54-history-row is-current"><b>${escapeHtml(check.technician || "Current ROOT field check")}</b><span>Input ${check.inputDbm ?? "-"} dBm; through ${check.throughDbm ?? "-"} dBm; ${escapeHtml(check.interpretation?.label || "Recorded")}</span><small>${escapeHtml(new Date(check.timestamp).toLocaleString())}</small></div>`).join("")}</details>`;
+}
+
+function renderNode54DeviceCard(stop){
+  if (!stop.expectedRatio) return "";
+  const latest = getNode54LatestDeviceCheck(stop.id);
+  const expected = NODE54_TAP_RATIO_ESTIMATES[stop.expectedRatio];
+  return `<section class="node54-device-card">
+    <div class="map-field-card-kicker">PCOT / TAP FIELD VERIFICATION</div>
+    <h3>${escapeHtml(stop.device)} - designed ${escapeHtml(stop.expectedRatio)} through/tap ratio</h3>
+    <p>Design ratio comes from imported production codes. Confirm the installed label; estimated through-loss is about ${Number(expected?.throughLossDb || 0).toFixed(1)} dB, not a manufacturer tolerance.</p>
+    <div class="node54-device-grid"><label>Actual installed ratio<select id="node54ActualRatio" class="input"><option value="">Unknown</option>${Object.keys(NODE54_TAP_RATIO_ESTIMATES).map((ratio) => `<option value="${ratio}">${ratio}</option>`).join("")}</select></label><label>Direction verification<select id="node54Direction" class="input"><option value="unknown">Unknown</option><option value="confirmed">Input to through/out confirmed</option><option value="reversed">Possible reversed terminal</option></select></label><label>INPUT power at 1550 nm<input id="node54DeviceInput" class="input" type="number" inputmode="decimal" step="0.01" placeholder="dBm" /></label><label>THROUGH/OUT power at 1550 nm<input id="node54DeviceThrough" class="input" type="number" inputmode="decimal" step="0.01" placeholder="dBm" /></label><label>Tap/drop power (if accessible)<input id="node54DeviceTap" class="input" type="number" inputmode="decimal" step="0.01" placeholder="dBm" /></label><label>Physical input/through port IDs<input id="node54DevicePorts" class="input" type="text" placeholder="Input / through / tap" /></label></div>
+    <div class="node54-verify-list"><label><input id="node54LabelVerified" type="checkbox" /> Equipment and manufacturer label photographed</label><label><input id="node54FiberVerified" type="checkbox" /> Fiber and splice/port assignment verified where visible</label></div>
+    <button class="btn node54-primary node54-save" type="button" data-map-field-action="node54SaveDevice">RECORD DEVICE CHECK</button>
+    ${latest ? `<div class="node54-last-result"><b>Latest device check:</b> ${escapeHtml(latest.interpretation?.label || "Recorded")}${latest.interpretation?.deltaDb !== null && latest.interpretation?.deltaDb !== undefined ? ` - ${Number(latest.interpretation.deltaDb).toFixed(2)} dB through loss` : ""}</div>` : ""}
+  </section>`;
+}
+
 function renderNode54DiagnosticPanel(){
   const diag = state.node54Diagnostics;
   const stop = getNode54Stop();
@@ -26700,6 +26778,7 @@ function renderNode54DiagnosticPanel(){
   const site = findNode54Site(stop);
   const coords = getSiteCoords(site);
   const currentGps = state.map.myLocation;
+  const distanceMeters = getNode54DistanceMeters(stop);
   const history = getNode54HistoryForPath(stepItem.path);
   const previous = getNode54LatestReading(stepItem.id);
   const suggested = NODE54_STOPS.find((item) => item.id === diag.suggestedStopId);
@@ -26720,8 +26799,12 @@ function renderNode54DiagnosticPanel(){
       <span><b>NP</b>${escapeHtml(stop.np || "—")}</span><span><b>CP</b>${escapeHtml(stop.cp || "—")}</span><span><b>PON</b>${escapeHtml(stop.pon)}</span><span><b>Device</b>${escapeHtml(stop.device)}</span>
       <span><b>Cable ID</b>Not confirmed</span><span><b>PCOT ratio</b>Not confirmed</span>
       <span class="wide"><b>Project GPS</b>${coords ? `${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}` : "Unavailable"}</span>
+      <span class="wide"><b>Address / road</b>${escapeHtml(site?.address || site?.street || "Not stored in the project record")}</span>
       <span class="wide"><b>Current device GPS</b>${currentGps ? `${Number(currentGps.lat).toFixed(6)}, ${Number(currentGps.lng).toFixed(6)}${Number.isFinite(currentGps.accuracy_m) ? ` (±${Math.round(currentGps.accuracy_m)}m)` : ""}` : "Not captured yet"}</span>
+      <span class="wide"><b>Distance from current device</b>${distanceMeters === null ? "Capture device GPS to calculate" : formatDistanceFeetMeters(distanceMeters)}</span>
     </div>
+    <button class="btn secondary" type="button" data-map-field-action="node54Focus" data-stop-id="${escapeHtml(stop.id)}">NAVIGATE HERE ON MAP</button>
+    ${renderNode54DeviceCard(stop)}
     <section class="node54-test-card">
       <div class="node54-step-count">TEST ${stepIndex + 1} OF ${stop.steps.length}</div>
       <h3>${escapeHtml(stepItem.label)}</h3>
@@ -26737,6 +26820,7 @@ function renderNode54DiagnosticPanel(){
       ${previous ? `<div class="node54-last-result"><b>Latest current-session reading:</b> ${Number(previous.measurementDbm).toFixed(2)} dBm · ${escapeHtml(previous.interpretation?.label || "Recorded")}</div>` : ""}
     </section>
     <details class="node54-history"><summary>Historical readings (immutable; LOW/HIGH meaning unknown)</summary>${history.map((line) => `<div>${escapeHtml(line)}</div>`).join("") || "<div>No listed historical comparison.</div>"}</details>
+    ${renderNode54PreviousEvidence(stop)}
     <details class="node54-guidance-rules"><summary>How the guidance is calculated</summary><p>For paired before/after tests, the first-pass guidance treats an incoming reading at or below ${NODE54_THRESHOLDS.weakAbsoluteDbm} dBm as already weak upstream, a loss of ${NODE54_THRESHOLDS.materialLossDb} dB or more as a material interval loss, and a change within ${NODE54_THRESHOLDS.approximatelyEqualDb} dB with usable absolute signal as approximately equal. These are conservative guidance thresholds, not stored plant facts; verify the test setup before acting.</p></details>
     <div class="node54-p0004-warning"><strong>SEPARATE P0004 ISSUE</strong><span>1687 → 1688 → 12801 belongs to 1635CA_04 / P0004 and is intentionally excluded from this P0002 trace.</span></div>
     ${suggested ? `<div class="node54-next-card"><b>Suggested next location</b><span>${escapeHtml(suggested.title)}</span><button class="btn node54-primary" type="button" data-map-field-action="node54Navigate" data-stop-id="${suggested.id}">NAVIGATE TO NEXT TEST</button></div>` : ""}
@@ -26799,6 +26883,52 @@ async function saveNode54Reading(){
   toast("Diagnostic reading saved", `${stepItem.path} ${measurementDbm.toFixed(2)} dBm saved to this device.`);
 }
 
+function getNode54FieldNumber(id){
+  const raw = String($(id)?.value || "").trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+function saveNode54DeviceCheck(){
+  const stop = getNode54Stop();
+  if (!stop.expectedRatio) return;
+  const inputDbm = getNode54FieldNumber("node54DeviceInput");
+  const throughDbm = getNode54FieldNumber("node54DeviceThrough");
+  const tapDbm = getNode54FieldNumber("node54DeviceTap");
+  const actualRatio = String($("node54ActualRatio")?.value || "");
+  const direction = String($("node54Direction")?.value || "unknown");
+  if ([inputDbm, throughDbm, tapDbm].some((value) => value !== null && (value > 5 || value < -80))){
+    toast("Invalid optical reading", "Use a dBm value between -80 and +5.", "error");
+    return;
+  }
+  const interpretation = assessNode54Device({ inputDbm, throughDbm, expectedRatio: stop.expectedRatio, actualRatio, direction });
+  const neighbors = getNode54StopNeighbors(stop.id);
+  if (interpretation.nextAction === "upstream" && neighbors.upstreamId) state.node54Diagnostics.suggestedStopId = neighbors.upstreamId;
+  else if (interpretation.nextAction === "downstream" && neighbors.downstreamId) state.node54Diagnostics.suggestedStopId = neighbors.downstreamId;
+  else state.node54Diagnostics.suggestedStopId = stop.id;
+  const check = {
+    id: globalThis.crypto?.randomUUID?.() || `device_check_${Date.now()}`,
+    sessionId: state.node54Diagnostics.sessionId,
+    timestamp: nowISO(), projectId: state.activeProject?.id || "", stopId: stop.id,
+    location: stop.title, siteId: findNode54Site(stop)?.id || null, np: stop.np, cp: stop.cp,
+    path: stop.steps[0]?.path || "", expectedRatio: stop.expectedRatio, actualRatio, direction,
+    inputDbm, throughDbm, tapDbm, portIdentification: String($("node54DevicePorts")?.value || "").trim(),
+    labelPhotographed: Boolean($("node54LabelVerified")?.checked), fiberVerified: Boolean($("node54FiberVerified")?.checked),
+    gps: state.map.myLocation ? { lat: Number(state.map.myLocation.lat), lng: Number(state.map.myLocation.lng), accuracy_m: Number(state.map.myLocation.accuracy_m) || null } : null,
+    technician: state.profile?.display_name || state.user?.email || state.user?.id || "Unknown user",
+    photo: state.node54Diagnostics.pendingPhoto ? { ...state.node54Diagnostics.pendingPhoto, storage: "device_indexeddb" } : null,
+    interpretation,
+  };
+  state.node54Diagnostics.deviceChecks.push(check);
+  state.node54Diagnostics.pendingPhoto = null;
+  persistNode54Session();
+  renderMapFieldPanel();
+  renderNode54MapOverlay();
+  const action = interpretation.nextAction === "upstream" ? "Go upstream" : interpretation.nextAction === "downstream" ? "Go downstream" : "Remain here";
+  toast("Device check recorded", `${interpretation.label}. ${action}.`);
+}
+
 const ROOT_CC_XRAY_COLORS = Object.freeze({
   critical: "#ef4444",
   attention: "#f59e0b",
@@ -26820,6 +26950,7 @@ function resetRootCommandCenterProject(){
   state.rootCommandCenter.analysis = null;
   state.rootCommandCenter.unavailable = [];
   state.rootCommandCenter.fieldBrief = null;
+  state.rootCommandCenter.workerNames = {};
   state.rootCommandCenter.xrayEnabled = false;
 }
 
@@ -26881,6 +27012,12 @@ async function loadRootCommandCenterData({ silent = false, force = false } = {})
     if (token !== state.rootCommandCenter.loadToken || projectId !== String(state.activeProject?.id || "")) return null;
     [media, codes, workLogs, closeouts, redlines] = sources.map((source) => source.rows);
     sources.filter((source) => source.error).forEach((source) => unavailable.push(source.label));
+    const historicalUserIds = [...new Set([...workLogs, ...closeouts].map((row) => String(row?.user_id || "")).filter(Boolean))];
+    if (historicalUserIds.length){
+      const profiles = await runRootCommandCenterSource("Worker profiles", state.client.from("profiles").select("id, display_name").in("id", historicalUserIds));
+      if (profiles.error) unavailable.push(profiles.label);
+      state.rootCommandCenter.workerNames = Object.fromEntries(profiles.rows.map((row) => [String(row.id), String(row.display_name || "").trim() || `User ${String(row.id).slice(0, 8)}`]));
+    }
   }
   const analysis = analyzeRootProject({ project: state.activeProject, sites, media, codes, workLogs, closeouts, redlines, opticalConcernThresholdDbm: TEST_RESULT_REVISIT_THRESHOLD_DB });
   if (token !== state.rootCommandCenter.loadToken || projectId !== String(state.activeProject?.id || "")) return null;
@@ -37674,6 +37811,10 @@ async function initAuth(){
   }
 
   state.client = await makeClient();
+  // Runtime configuration is fetched asynchronously. Refresh the banner after
+  // client creation so a valid local dev config does not retain the startup
+  // "missing" warning.
+  setEnvWarning();
   if (!state.client){
     if (isDemo){
       await enterDemoBootstrapSession({ persistSession: false });
@@ -39811,8 +39952,16 @@ function wireUI(){
           await saveNode54Reading();
           return;
         }
+        if (action === "node54SaveDevice"){
+          saveNode54DeviceCheck();
+          return;
+        }
         if (action === "node54Navigate"){
           selectNode54Stop(actionBtn.dataset.stopId || state.node54Diagnostics.suggestedStopId);
+          return;
+        }
+        if (action === "node54Focus"){
+          focusNode54Stop(actionBtn.dataset.stopId || state.node54Diagnostics.currentStopId);
           return;
         }
         if (action === "startFieldDay"){
