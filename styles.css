@@ -5781,9 +5781,13 @@ body:not(.map-mode) .gis-drawer {
   display: none !important;
 }
 
-/* When NOT in map-mode, the main content fills full width */
+/* When NOT in map-mode, the main content fills full width.
+   No !important: this rule exists to beat .app-shell{display:grid}, and its
+   specificity (0,2,1) already does that. With !important it also beat the
+   inline display:none that showAuth() sets, which left the whole signed-out
+   app shell laid out behind the splash screen. */
 body:not(.map-mode) .app-shell {
-  display: block !important;
+  display: block;
 }
 body:not(.map-mode) .content {
   width: 100% !important;
@@ -10390,3 +10394,449 @@ body.map-mode #liveMap {
   .root-cc-search-row .btn { width: 100%; }
   .root-map-status-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ==========================================================================
+   EBC — Engineer Budget Calculator
+   Uses the application palette variables so the calculator inherits whichever
+   theme is active rather than looking like a separate mini-app. Laid out for
+   the large ROOT desktop interface and for an iPhone held at a pedestal.
+   ========================================================================== */
+
+.ebc-root{ padding:0; }
+.ebc-shell{ display:grid; gap:14px; max-width:var(--max); margin:0 auto; }
+.ebc-card{ padding:16px; }
+
+.ebc-header{ display:grid; gap:12px; }
+.ebc-header h1{ margin:2px 0 4px; font-size:1.35rem; letter-spacing:.01em; }
+.ebc-header-main{ min-width:0; }
+.ebc-header-controls{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+  gap:10px;
+  align-items:end;
+}
+.ebc-source-note{ font-size:.74rem; color:var(--muted); line-height:1.45; }
+
+.ebc-field{ display:grid; gap:4px; min-width:0; }
+.ebc-field > span{
+  font-size:.7rem;
+  font-weight:700;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+  color:var(--muted);
+}
+.ebc-field .input{ width:100%; min-height:44px; }
+
+.ebc-mode-toggle{
+  display:inline-flex;
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  overflow:hidden;
+  align-self:end;
+}
+.ebc-mode-btn{
+  min-height:44px;
+  padding:0 18px;
+  border:0;
+  background:transparent;
+  color:var(--muted);
+  font-weight:800;
+  letter-spacing:.03em;
+  cursor:pointer;
+}
+.ebc-mode-btn.is-active{ background:var(--primary); color:#fff; }
+
+.ebc-action-row{ display:flex; flex-wrap:wrap; gap:8px; }
+.ebc-action-row .btn, .ebc-node-actions .btn{ min-height:46px; }
+.btn.ebc-primary{
+  background:var(--primary);
+  border:1px solid var(--primary);
+  color:#fff;
+  font-weight:900;
+  letter-spacing:.025em;
+}
+.btn.ebc-primary:hover{ background:var(--primary-hover); }
+
+/* --- Banners and gaps --------------------------------------------------- */
+.ebc-banner{
+  display:grid;
+  gap:4px;
+  padding:12px 14px;
+  border-radius:var(--radius);
+  border:1px solid var(--warn);
+  background:color-mix(in srgb, var(--warn) 12%, transparent);
+  font-size:.82rem;
+}
+.ebc-banner strong{ letter-spacing:.04em; font-size:.78rem; }
+.ebc-banner-sub{ color:var(--muted); font-size:.75rem; line-height:1.5; }
+
+.ebc-gaps{
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:10px 14px;
+  background:var(--surface);
+}
+.ebc-gaps summary{ cursor:pointer; font-weight:800; font-size:.82rem; }
+.ebc-gap-group{ margin-top:10px; }
+.ebc-gap-group h4{
+  margin:0 0 6px;
+  font-size:.7rem;
+  text-transform:uppercase;
+  letter-spacing:.05em;
+  color:var(--muted);
+}
+.ebc-gap{
+  padding:7px 10px;
+  margin-bottom:6px;
+  border-left:3px solid var(--border);
+  background:color-mix(in srgb, var(--border) 18%, transparent);
+  border-radius:6px;
+  font-size:.8rem;
+  line-height:1.45;
+}
+.ebc-gap.is-blocking{ border-left-color:var(--bad); }
+.ebc-gap.is-warning{ border-left-color:var(--warn); }
+
+/* --- Summary tiles ------------------------------------------------------ */
+.ebc-summary{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:10px;
+}
+.ebc-summary-tile{
+  display:grid;
+  gap:4px;
+  padding:12px 14px;
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  background:var(--surface);
+}
+.ebc-summary-tile > span{
+  font-size:.68rem;
+  text-transform:uppercase;
+  letter-spacing:.05em;
+  color:var(--muted);
+  font-weight:700;
+}
+.ebc-summary-tile > strong{ font-size:1.05rem; font-variant-numeric:tabular-nums; }
+.ebc-summary.is-blocked{ opacity:.85; }
+
+/* --- Status pills -------------------------------------------------------- */
+.ebc-status{
+  display:inline-block;
+  padding:4px 10px;
+  border-radius:999px;
+  font-size:.72rem;
+  font-weight:900;
+  letter-spacing:.06em;
+}
+.ebc-status.is-pass{ background:color-mix(in srgb, var(--ok) 20%, transparent); color:var(--ok); }
+.ebc-status.is-marginal{ background:color-mix(in srgb, var(--warn) 22%, transparent); color:var(--warn); }
+.ebc-status.is-fail{ background:color-mix(in srgb, var(--bad) 18%, transparent); color:var(--bad); }
+.ebc-status.is-unknown{ background:color-mix(in srgb, var(--border) 30%, transparent); color:var(--muted); }
+
+/* --- PCOT cards ---------------------------------------------------------- */
+.ebc-cascade{ display:grid; gap:12px; }
+.ebc-node-card{
+  display:grid;
+  gap:10px;
+  padding:14px 16px;
+  border:1px solid var(--border);
+  border-left:5px solid var(--border);
+  border-radius:var(--radius);
+  background:#fbfcff;
+  box-shadow:var(--shadow);
+}
+.ebc-node-card.is-pass{ border-left-color:var(--ok); }
+.ebc-node-card.is-marginal{ border-left-color:var(--warn); }
+.ebc-node-card.is-fail{ border-left-color:var(--bad); }
+
+.ebc-node-head{ display:flex; flex-wrap:wrap; gap:10px; justify-content:space-between; align-items:flex-start; }
+.ebc-node-head h3{ margin:0 0 4px; font-size:1.1rem; }
+.ebc-ratio-line{ display:flex; flex-wrap:wrap; gap:12px; font-size:.8rem; color:var(--muted); }
+.ebc-ratio-line b{ color:var(--text); }
+.ebc-status-block{ display:grid; gap:4px; justify-items:flex-end; text-align:right; }
+.ebc-margin{ font-size:.78rem; font-weight:700; font-variant-numeric:tabular-nums; }
+
+.ebc-readout{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:8px;
+}
+.ebc-readout > div{
+  display:grid;
+  gap:2px;
+  padding:9px 10px;
+  border-radius:10px;
+  background:color-mix(in srgb, var(--border) 16%, transparent);
+}
+.ebc-readout span{
+  font-size:.66rem;
+  text-transform:uppercase;
+  letter-spacing:.05em;
+  color:var(--muted);
+  font-weight:700;
+}
+.ebc-readout b{ font-size:1rem; font-variant-numeric:tabular-nums; }
+.ebc-status-reason{ font-size:.78rem; color:var(--muted); line-height:1.45; }
+
+.ebc-node-inputs summary, .ebc-specs summary{ cursor:pointer; font-weight:800; font-size:.8rem; padding:4px 0; }
+.ebc-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:10px;
+  margin-top:10px;
+}
+.ebc-historical{
+  margin-top:10px;
+  padding:9px 11px;
+  border-radius:8px;
+  font-size:.78rem;
+  line-height:1.5;
+  background:color-mix(in srgb, var(--border) 16%, transparent);
+}
+.ebc-inline-note{ font-size:.74rem; color:var(--muted); line-height:1.5; margin-top:8px; }
+
+.ebc-node-actions{ display:flex; flex-wrap:wrap; gap:8px; }
+.ebc-node-actions .btn.small{ font-size:.72rem; padding:0 12px; }
+
+/* --- Audit trace --------------------------------------------------------- */
+.ebc-trace{
+  margin:0;
+  padding:12px 14px;
+  border-radius:10px;
+  border:1px solid var(--border);
+  background:#0b1220;
+  color:#e2e8f0;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:.74rem;
+  line-height:1.6;
+  overflow-x:auto;
+  white-space:pre;
+}
+
+/* --- Field mode ---------------------------------------------------------- */
+.ebc-field-section{
+  padding:12px 14px;
+  border-radius:var(--radius);
+  border:1px dashed var(--border);
+  background:color-mix(in srgb, var(--border) 10%, transparent);
+}
+.ebc-table-scroll{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
+table.ebc-compare{
+  width:100%;
+  border-collapse:collapse;
+  margin-top:10px;
+  font-size:.8rem;
+}
+table.ebc-compare th, table.ebc-compare td{
+  padding:8px 10px;
+  border-bottom:1px solid var(--border);
+  text-align:right;
+  white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
+table.ebc-compare th:first-child, table.ebc-compare td:first-child{ text-align:left; }
+table.ebc-compare th{
+  font-size:.68rem;
+  text-transform:uppercase;
+  letter-spacing:.05em;
+  color:var(--muted);
+}
+table.ebc-compare tr.is-below_prediction td{ color:var(--bad); }
+table.ebc-compare tr.is-above_prediction td{ color:var(--warn); }
+table.ebc-compare tr.is-rejected{ opacity:.62; }
+table.ebc-compare tr.is-feasible td:first-child{ font-weight:800; }
+.ebc-whatif-why td{
+  text-align:left !important;
+  white-space:normal !important;
+  font-size:.73rem;
+  color:var(--muted);
+  padding-top:0 !important;
+  border-bottom:1px solid var(--border);
+}
+
+.ebc-indicators{ display:grid; gap:8px; margin-top:10px; }
+.ebc-indicator{
+  padding:10px 12px;
+  border-radius:10px;
+  border-left:3px solid var(--warn);
+  background:color-mix(in srgb, var(--warn) 10%, transparent);
+}
+.ebc-indicator.is-demonstrated{ border-left-color:var(--bad); background:color-mix(in srgb, var(--bad) 10%, transparent); }
+.ebc-indicator.is-possible{ border-left-color:var(--muted); background:color-mix(in srgb, var(--border) 16%, transparent); }
+.ebc-indicator strong{ font-size:.84rem; }
+.ebc-indicator p{ margin:5px 0 0; font-size:.78rem; line-height:1.5; color:var(--muted); }
+.ebc-indicator-confidence{
+  margin-left:8px;
+  font-size:.64rem;
+  font-weight:900;
+  letter-spacing:.06em;
+  color:var(--muted);
+}
+
+/* --- Recommendation ------------------------------------------------------ */
+.ebc-recommendation{
+  padding:12px 14px;
+  border-radius:var(--radius);
+  border:1px solid var(--border);
+  background:color-mix(in srgb, var(--border) 14%, transparent);
+}
+.ebc-recommendation.is-change{ border-color:var(--ok); background:color-mix(in srgb, var(--ok) 10%, transparent); }
+.ebc-recommendation.is-nosafe{ border-color:var(--bad); background:color-mix(in srgb, var(--bad) 10%, transparent); }
+.ebc-recommendation.is-blocked{ border-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, transparent); }
+.ebc-recommendation strong{ font-size:.92rem; letter-spacing:.02em; }
+.ebc-recommendation p{ margin:6px 0 0; font-size:.8rem; line-height:1.5; }
+.ebc-recommendation ul{ margin:8px 0 0 18px; font-size:.78rem; line-height:1.6; }
+.ebc-rec-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:8px;
+  margin-top:10px;
+}
+.ebc-rec-grid > div{ display:grid; gap:2px; }
+.ebc-rec-grid span{
+  font-size:.66rem;
+  text-transform:uppercase;
+  letter-spacing:.05em;
+  color:var(--muted);
+  font-weight:700;
+}
+.ebc-rec-grid b{ font-size:.92rem; font-variant-numeric:tabular-nums; }
+.ebc-limiting{ margin-top:8px; font-size:.8rem; line-height:1.5; }
+
+.ebc-whatif-head{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+.ebc-whatif-head h2{ margin:2px 0 0; font-size:1.05rem; }
+
+.ebc-tag{
+  display:inline-block;
+  padding:2px 8px;
+  border-radius:999px;
+  font-size:.64rem;
+  font-weight:900;
+  letter-spacing:.05em;
+  background:color-mix(in srgb, var(--border) 30%, transparent);
+  color:var(--muted);
+}
+.ebc-tag.is-ok{ background:color-mix(in srgb, var(--ok) 18%, transparent); color:var(--ok); }
+.ebc-tag.is-bad{ background:color-mix(in srgb, var(--bad) 16%, transparent); color:var(--bad); }
+.ebc-tag.is-blocked{ background:color-mix(in srgb, var(--warn) 18%, transparent); color:var(--warn); }
+
+.ebc-empty{ padding:20px 0; color:var(--muted); font-size:.86rem; line-height:1.6; }
+.btn.node54-open-ebc{ min-height:44px; margin-top:6px; width:100%; }
+
+/* --- Phone --------------------------------------------------------------- */
+@media (max-width:720px){
+  .ebc-card{ padding:13px; }
+  .ebc-header h1{ font-size:1.15rem; }
+  .ebc-header-controls{ grid-template-columns:1fr; }
+  .ebc-mode-toggle{ width:100%; }
+  .ebc-mode-btn{ flex:1; padding:0 10px; }
+  .ebc-action-row .btn{ flex:1 1 100%; }
+  .ebc-readout{ grid-template-columns:1fr; }
+  .ebc-node-head{ flex-direction:column; }
+  .ebc-status-block{ justify-items:flex-start; text-align:left; }
+  .ebc-grid{ grid-template-columns:1fr; }
+  .ebc-node-actions .btn{ flex:1 1 100%; }
+  .ebc-trace{ font-size:.68rem; }
+}
+.ebc-part-line{ margin-top:5px; font-size:.72rem; color:var(--muted); line-height:1.45; }
+.ebc-part-line b{ color:var(--text); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+.ebc-node-head h3 .ebc-tag{ vertical-align:middle; margin-left:6px; }
+
+/* --- EBC data-quality and preliminary signalling ------------------------- */
+.ebc-status-strip{
+  display:grid;
+  gap:3px;
+  padding:11px 14px;
+  border-radius:var(--radius);
+  border-left:5px solid var(--warn);
+  background:color-mix(in srgb, var(--warn) 13%, transparent);
+}
+.ebc-status-strip.is-approved{
+  border-left-color:var(--ok);
+  background:color-mix(in srgb, var(--ok) 10%, transparent);
+}
+.ebc-status-strip strong{ font-size:.82rem; letter-spacing:.04em; }
+.ebc-status-strip span{ font-size:.78rem; line-height:1.5; color:var(--muted); }
+.ebc-status-strip-sub{ font-weight:600; }
+
+.ebc-prelim-chip{
+  display:inline-block;
+  margin-bottom:7px;
+  padding:3px 9px;
+  border-radius:999px;
+  font-size:.64rem;
+  font-weight:900;
+  letter-spacing:.05em;
+  background:color-mix(in srgb, var(--warn) 22%, transparent);
+  color:var(--warn);
+}
+
+.ebc-quality{
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:10px 14px;
+  background:var(--surface);
+}
+.ebc-quality summary{ cursor:pointer; font-weight:800; font-size:.8rem; }
+.ebc-quality-group{ margin-top:12px; }
+.ebc-quality-group h4{
+  margin:0 0 6px;
+  font-size:.72rem;
+  text-transform:uppercase;
+  letter-spacing:.04em;
+  color:var(--muted);
+}
+.ebc-quality-row{
+  display:grid;
+  gap:2px;
+  padding:7px 10px;
+  margin-bottom:5px;
+  border-left:3px solid var(--border);
+  border-radius:6px;
+  background:color-mix(in srgb, var(--border) 14%, transparent);
+}
+.ebc-quality-row b{ font-size:.78rem; }
+.ebc-quality-row span{ font-size:.73rem; line-height:1.5; color:var(--muted); }
+.ebc-quality-group.is-field_data .ebc-quality-row{ border-left-color:#3b82f6; }
+.ebc-quality-group.is-design_data .ebc-quality-row{ border-left-color:var(--ok); }
+.ebc-quality-group.is-engineering_constant .ebc-quality-row{ border-left-color:var(--ok); }
+.ebc-quality-group.is-estimate .ebc-quality-row{ border-left-color:var(--warn); }
+.ebc-quality-group.is-unknown .ebc-quality-row{ border-left-color:var(--bad); }
+.ebc-quality-group.is-hardware .ebc-quality-row{ border-left-color:var(--muted); }
+.ebc-quality-group.is-candidate .ebc-quality-row{ border-left-color:var(--muted); }
+
+.ebc-field-head{ display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+.ebc-field-identity{
+  font-size:.74rem;
+  font-weight:800;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:var(--text);
+}
+.ebc-grid-readings{ grid-template-columns:repeat(3,1fr); }
+.ebc-grid-readings .input{ font-size:1.05rem; font-variant-numeric:tabular-nums; text-align:center; }
+@media (max-width:720px){
+  .ebc-grid-readings{ grid-template-columns:1fr; }
+}
+
+/* Grid children default to min-width:auto, so a wide scrollable block (the
+   audit trace, a comparison table) stretches its whole track instead of
+   scrolling inside itself. Opt every EBC grid child out of that. */
+.ebc-shell > *,
+.ebc-node-card > *,
+.ebc-field-section > *,
+.ebc-quality-group > *,
+.ebc-quality-row > *,
+.ebc-summary > *,
+.ebc-grid > *{
+  min-width:0;
+}
+.ebc-trace{ max-width:100%; }
+.ebc-quality-row b,
+.ebc-quality-row span,
+.ebc-part-line,
+.ebc-gap{
+  overflow-wrap:anywhere;
+}
+.ebc-table-scroll{ max-width:100%; min-width:0; }

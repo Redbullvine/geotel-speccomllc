@@ -2855,6 +2855,15 @@
           </div>
         </section>
 
+        <!-- EBC — Engineer Budget Calculator. The screen is rendered by
+             renderEbcScreen() in app.js so the optical math stays in
+             services/ebc/ and this file holds no calculation logic. -->
+        <section id="viewEbc" class="view ebc-view" aria-labelledby="ebcTitle">
+          <div id="ebcRoot" class="ebc-root">
+            <div class="muted small">Loading the Engineer Budget Calculator…</div>
+          </div>
+        </section>
+
         <section id="viewLabor" class="view">
           <div class="card">
             <div class="row" style="justify-content:space-between;">
@@ -3568,6 +3577,10 @@
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 11V6l5-4 5 4v5"/><path d="M4.5 11V8h5v3"/><circle cx="7" cy="5.5" r="1"/></svg>
             ROOT Command Center
           </button>
+          <button id="btnMenuWorkspaceGateway" class="menu-link" type="button" data-view="viewDashboard">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 6.5L7 2l5 4.5"/><path d="M3.5 6v6h7V6"/><path d="M6 12V8.5h2V12"/></svg>
+            Home · Workspace Gateway
+          </button>
           <button class="menu-link" type="button" data-view="viewMap">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="5.5"/><path d="M7 4v3l2 1.5"/></svg>
             Home
@@ -3595,6 +3608,10 @@
           <button class="menu-link" type="button" data-view="viewCatalog">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="10" height="10" rx="1"/><path d="M2 6h10M6.5 2v10"/></svg>
             Warehouse
+          </button>
+          <button class="menu-link" type="button" data-view="viewEbc">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 7h3l1.5-3 2 6 1.5-3h3"/></svg>
+            EBC Calculator
           </button>
         </div>
         <div class="menu-section">
