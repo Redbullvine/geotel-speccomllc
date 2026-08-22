@@ -25,13 +25,22 @@ import {
   isProjectContextCurrent,
 } from "./services/fieldVisitEvidence.mjs";
 import {
+  lastWorkspaceStorageKey,
+  normalizeWorkspaceHash,
+  resolveLandingRoute,
+  resolveRoleTier,
+} from "./services/landingRoute.mjs";
+import {
   assessComponentPair,
+  assessNode54Device,
   buildBranchStatuses,
   isNode54Project,
   NODE54_HISTORY,
+  NODE54_IMPORTED_EVIDENCE,
   NODE54_SCHEMATIC_SEGMENTS,
   NODE54_STATUS,
   NODE54_STOPS,
+  NODE54_TAP_RATIO_ESTIMATES,
   NODE54_THRESHOLDS,
 } from "./services/node54Diagnostics.mjs";
 import {
@@ -39,6 +48,35 @@ import {
   buildRootFieldBrief,
   searchRootProject,
 } from "./services/rootCommandCenter.mjs";
+// EBC — Engineer Budget Calculator. All optical math lives in services/ebc/ so
+// the EBC screen, the node map, location cards and any automated Node analysis
+// share one implementation instead of each carrying its own copy.
+import {
+  buildNode54Legs,
+  describeProvenance as ebcDescribeProvenance,
+  EBC_CANDIDATE_LIMITS,
+  EBC_DATA_CLASS,
+  EBC_DATA_CLASS_LABELS,
+  EBC_HARDWARE_IDENTIFICATION,
+  EBC_REQUIRED_UNKNOWN_CONSTANTS,
+  TDS_COMMSCOPE_CORRELATION,
+  TDS_PRICELIST_SOURCE,
+  TDS_TAP_LOSS_DB,
+  calculateLeg as ebcCalculateLeg,
+  compareMeasuredToPredicted as ebcCompare,
+  DEFAULT_PCOT_SPECS,
+  EBC_RECOMMENDATION_OUTCOME,
+  EBC_STATUS,
+  findNode54LegForPcot,
+  findNodeResult as ebcFindNode,
+  formatTrace as ebcFormatTrace,
+  listPcotSpecs,
+  PCOT_RATIOS,
+  recommendPcot as ebcRecommend,
+  unspecifiedRatios as ebcUnspecifiedRatios,
+  usableRatios as ebcUsableRatios,
+  whatIf as ebcWhatIf,
+} from "./services/ebc/index.mjs";
 
 const isDebug = new URLSearchParams(location.search).has("debug");
 const dlog = (...args) => { if (isDebug) console.log(...args); };
@@ -78,6 +116,9 @@ const FIELD_SUBCONTRACTOR_ALLOWED_VIEWS = new Set([
   "viewNodes",
   "viewPhotos",
   "viewDailyReport",
+  // The EBC is a field tool first: a subcontractor standing at a PCOT needs it
+  // on the phone. It reads project data and writes only its own local draft.
+  "viewEbc",
 ]);
 
 const SHOWCASE_GROUPS = [
@@ -463,9 +504,24 @@ const state = {
     currentStopId: "cp13817",
     currentStepIndex: 0,
     readings: [],
+    deviceChecks: [],
     suggestedStopId: "",
     layer: null,
     pendingPhoto: null,
+  },
+  // EBC drafts are the technician's own working inputs. They are deliberately
+  // separate from designed ratios, installed ratios and recorded field
+  // evidence, and are never written back over any of them.
+  ebc: {
+    legId: "",
+    mode: "design",
+    drafts: {},
+    result: null,
+    whatIf: null,
+    recommendation: null,
+    openTrace: {},
+    focusNodeId: "",
+    specs: null,
   },
   rootCommandCenter: {
     projectId: "",
@@ -478,6 +534,7 @@ const state = {
     xrayEnabled: false,
     xrayLayer: null,
     fieldBrief: null,
+    workerNames: {},
   },
   pinOverview: {
     open: false,
@@ -3306,6 +3363,9 @@ function setActiveView(viewId, { syncHash = true } = {}){
     renderSubcontractorOnboarding();
     void loadSubcontractorOnboarding();
   }
+  if (viewId === "viewEbc"){
+    renderEbcScreen();
+  }
   if (viewId === "viewTechnician"){
     if (state.features.labor) loadTechnicianTimesheet();
   }
@@ -3362,6 +3422,7 @@ function setActiveView(viewId, { syncHash = true } = {}){
   if (syncHash){
     syncHashForView(viewId);
   }
+  rememberLastWorkspaceHash();
 
   dlog("[route] setActiveView", {
     view: viewId,
@@ -11084,7 +11145,7 @@ function canShowModule(moduleKey){
 }
 
 function getProductionAllowedViews(){
-  return new Set(["viewDashboard", "viewOnboarding", "viewTechnician", "viewNodes", "viewPhotos", "viewBilling", "viewInvoices", "viewMap", "viewCatalog", "viewWarehouseScan", "viewAlerts", "viewAdmin", "viewSettings", "viewLabor", "viewDispatch", "viewSupervisor", "viewDailyReport", "viewRootCommandCenter"]);
+  return new Set(["viewDashboard", "viewOnboarding", "viewTechnician", "viewNodes", "viewPhotos", "viewBilling", "viewInvoices", "viewMap", "viewCatalog", "viewWarehouseScan", "viewAlerts", "viewAdmin", "viewSettings", "viewLabor", "viewDispatch", "viewSupervisor", "viewDailyReport", "viewRootCommandCenter", "viewEbc"]);
 }
 
 function canViewLabor(){
@@ -12323,7 +12384,13 @@ function syncHashForView(viewId){
     nextHash = "#technician";
   } else if (viewId === "viewInvoices"){
     const currentHash = String(window.location.hash || "").trim().toLowerCase();
-    nextHash = currentHash.startsWith("#demo") ? "#demo" : "#office";
+    if (currentHash.startsWith("#demo")){
+      nextHash = "#demo";
+    } else if (currentHash.startsWith("#billing")){
+      nextHash = "#billing";
+    } else {
+      nextHash = "#office";
+    }
   } else if (viewId === "viewCatalog" || viewId === "viewWarehouseScan"){
     nextHash = "#warehouse";
   } else if (viewId === "viewDispatch"){
@@ -12673,14 +12740,60 @@ function clearInvoiceDeepLinkUrl(){
   window.history.replaceState(null, "", `${nextPath}${window.location.search}`);
 }
 
+function getLandingUserId(){
+  return String(state.user?.id || state.session?.user?.id || "").trim();
+}
+
+function readLastWorkspaceHash(){
+  const storageKey = lastWorkspaceStorageKey(getLandingUserId());
+  if (!storageKey) return "";
+  try {
+    return normalizeWorkspaceHash(window.localStorage.getItem(storageKey) || "");
+  } catch {
+    return "";
+  }
+}
+
+function rememberLastWorkspaceHash(hashValue = window.location.hash){
+  const storageKey = lastWorkspaceStorageKey(getLandingUserId());
+  if (!storageKey) return "";
+  const normalized = normalizeWorkspaceHash(hashValue);
+  if (!normalized) return "";
+  try {
+    window.localStorage.setItem(storageKey, normalized);
+  } catch {}
+  return normalized;
+}
+
+// Landing never widens access: every candidate route is filtered through the
+// same isViewAllowed() gate the menu uses.
+function isLandingRouteAllowed(hashValue){
+  const viewId = parseViewFromHash(hashValue);
+  return Boolean(viewId && isViewAllowed(viewId));
+}
+
+function getLandingRoute(){
+  return resolveLandingRoute(state.profile, {
+    lastWorkspace: readLastWorkspaceHash(),
+    isAllowedRoute: isLandingRouteAllowed,
+  });
+}
+
+function getLandingView(){
+  return parseViewFromHash(getLandingRoute()) || "viewDashboard";
+}
+
 function getDefaultView({ allowHash = false } = {}){
   if (CONTROL_CENTER_DEV_MODE) return "viewDashboard";
   if (isSubcontractorOnboardingLocked()) return "viewOnboarding";
   if (getInvoiceIdFromUrl() && isViewAllowed("viewInvoices")) return "viewInvoices";
   if (allowHash){
+    // A deep link already names the workspace — never redirect away from it.
     const hashView = parseViewFromHash();
     if (hashView && isViewAllowed(hashView)) return hashView;
   }
+  const landingView = getLandingView();
+  if (landingView && isViewAllowed(landingView)) return landingView;
   if (isViewAllowed("viewMap")) return "viewMap";
   if (isViewAllowed("viewDashboard")) return "viewDashboard";
   return "viewDashboard";
@@ -12854,6 +12967,7 @@ function clearAuthenticatedWorkspaceState(){
 
 function applySignedOutUi(reason = "unknown"){
   state.authResolved = true;
+  _postLoginBootstrapDone = false;
   clearAuthenticatedWorkspaceState();
   document.body.classList.remove("map-mode", "sidebar-open", "map-create-open");
   renderProjects();
@@ -26487,6 +26601,7 @@ function createNode54Session(projectId){
     currentStopId: "cp13817",
     currentStepIndex: 0,
     readings: [],
+    deviceChecks: [],
     suggestedStopId: "",
   };
 }
@@ -26501,6 +26616,7 @@ function loadNode54Session(projectId){
   state.node54Diagnostics.currentStopId = NODE54_STOPS.some((stop) => stop.id === base.currentStopId) ? base.currentStopId : "cp13817";
   state.node54Diagnostics.currentStepIndex = Math.max(0, Number(base.currentStepIndex) || 0);
   state.node54Diagnostics.readings = Array.isArray(base.readings) ? base.readings : [];
+  state.node54Diagnostics.deviceChecks = Array.isArray(base.deviceChecks) ? base.deviceChecks : [];
   state.node54Diagnostics.suggestedStopId = String(base.suggestedStopId || "");
   state.node54Diagnostics.pendingPhoto = null;
   persistNode54Session();
@@ -26516,6 +26632,7 @@ function persistNode54Session(){
     currentStopId: diag.currentStopId,
     currentStepIndex: diag.currentStepIndex,
     readings: diag.readings,
+    deviceChecks: diag.deviceChecks,
     suggestedStopId: diag.suggestedStopId,
   }));
 }
@@ -26566,10 +26683,12 @@ function findNode54Site(stop){
 function getNode54StopStatus(stop, statuses){
   if (stop.id === state.node54Diagnostics.currentStopId) return "current";
   const paths = [...new Set(stop.steps.map((item) => item.path).filter(Boolean))];
+  const hasStopHistory = [...new Set(stop.steps.flatMap((item) => getNode54HistoryForPath(item.path)))].some((line) => line.includes(`NP${stop.np}`) || line.includes(`NP${stop.cp}`)) || Boolean(NODE54_IMPORTED_EVIDENCE[stop.np]?.length);
   if (paths.some((path) => statuses[path] === NODE54_STATUS.ISOLATED)) return "isolated";
   if (paths.length && paths.every((path) => [NODE54_STATUS.CLEARED, NODE54_STATUS.REVERIFIED].includes(statuses[path]))) return "cleared";
   if (paths.some((path) => statuses[path] === NODE54_STATUS.HISTORICAL_WEAK)) return "historical_weak";
   if (paths.some((path) => [NODE54_STATUS.INVESTIGATING, NODE54_STATUS.REVERIFIED].includes(statuses[path]))) return "investigating";
+  if (hasStopHistory) return "historical_good";
   if (paths.some((path) => statuses[path] === NODE54_STATUS.HISTORICAL_GOOD)) return "historical_good";
   return "untested";
 }
@@ -26608,7 +26727,12 @@ function renderNode54MapOverlay({ fit = false } = {}){
     if (!from || !to) return;
     window.L.polyline([[from.lat, from.lng], [to.lat, to.lng]], {
       color: segment.color, weight: 4, opacity: 0.78, dashArray: "9 7", interactive: true,
-    }).bindTooltip(`<strong>${escapeHtml(segment.paths)}</strong><br><span>Schematic relationship — not surveyed route</span>`, { sticky: true }).addTo(layer);
+    }).bindTooltip(`<strong>${escapeHtml(segment.paths)}</strong><br><span>Signal direction: ${escapeHtml(segment.from)} → ${escapeHtml(segment.to)}<br>Schematic relationship — not surveyed route</span>`, { sticky: true }).addTo(layer);
+    const directionDegrees = Math.atan2(to.lat - from.lat, to.lng - from.lng) * 180 / Math.PI;
+    window.L.marker([(from.lat + to.lat) / 2, (from.lng + to.lng) / 2], {
+      interactive: false,
+      icon: window.L.divIcon({ className: "node54-route-arrow", html: `<span style="--node54-route-color:${escapeHtml(segment.color)};--node54-route-angle:${directionDegrees}deg">➜</span>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
+    }).addTo(layer);
   });
   NODE54_STOPS.forEach((stop) => {
     const coords = coordsByStop.get(stop.id);
@@ -26620,7 +26744,10 @@ function renderNode54MapOverlay({ fit = false } = {}){
       fillColor: NODE54_MARKER_COLORS[status], fillOpacity: 0.96, weight: status === "current" ? 4 : 3,
       bubblingMouseEvents: false,
     }).addTo(layer);
-    marker.bindTooltip(`<strong>STOP ${stop.number}: ${escapeHtml(stop.title)}</strong><br>${escapeHtml(status.replaceAll("_", " "))}`);
+    const paths = [...new Set(stop.steps.map((item) => `${item.path}${item.fiber ? ` / ${item.fiber}` : ""}`))].join(" · ");
+    const expected = stop.expectedRatio ? `<br>Design ratio: ${escapeHtml(stop.expectedRatio)}` : "";
+    const historical = stop.steps.find((item) => item.reference !== null)?.reference;
+    marker.bindTooltip(`<strong>STOP ${stop.number}: ${escapeHtml(stop.title)}</strong><br>${escapeHtml(paths)}${expected}<br>Historical: ${historical === undefined ? "None listed" : `${Number(historical).toFixed(2)} dBm`}<br>Status: ${escapeHtml(status.replaceAll("_", " "))}`);
     marker.on("click", () => selectNode54Stop(stop.id, { focus: false }));
   });
   if (fit && bounds.length) state.map.instance.fitBounds(window.L.latLngBounds(bounds), { padding: [38, 38], maxZoom: 15 });
@@ -26691,6 +26818,67 @@ function getNode54LatestReading(stepId){
   return [...state.node54Diagnostics.readings].reverse().find((reading) => reading.stepId === stepId) || null;
 }
 
+function getNode54LatestDeviceCheck(stopId){
+  return [...(state.node54Diagnostics.deviceChecks || [])].reverse().find((check) => check.stopId === stopId) || null;
+}
+
+function getNode54StopNeighbors(stopId){
+  const incoming = NODE54_SCHEMATIC_SEGMENTS.find((segment) => segment.to === stopId);
+  const outgoing = NODE54_SCHEMATIC_SEGMENTS.find((segment) => segment.from === stopId);
+  return { upstreamId: incoming?.from || "", downstreamId: outgoing?.to || "" };
+}
+
+function getNode54EvidenceRecord(stop){
+  const records = state.rootCommandCenter.analysis?.records || [];
+  const site = findNode54Site(stop);
+  if (site?.id) return records.find((record) => String(record.siteId) === String(site.id)) || null;
+  const terms = stop?.siteTerms || [];
+  return records.find((record) => terms.some((term) => String(record.site?.name || "").toLowerCase().includes(String(term).toLowerCase()))) || null;
+}
+
+function getNode54DistanceMeters(stop){
+  const current = state.map.myLocation;
+  const coords = getSiteCoords(findNode54Site(stop));
+  if (!current || !coords) return null;
+  const toRad = (value) => Number(value) * Math.PI / 180;
+  const lat1 = toRad(current.lat), lat2 = toRad(coords.lat);
+  const dLat = lat2 - lat1, dLng = toRad(coords.lng) - toRad(current.lng);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function renderNode54PreviousEvidence(stop){
+  const record = getNode54EvidenceRecord(stop);
+  const pathHistory = [...new Set(stop.steps.flatMap((stepItem) => getNode54HistoryForPath(stepItem.path)))].filter((line) => line.includes(`NP${stop.np}`) || line.includes(`NP${stop.cp}`));
+  const workerName = (id) => state.rootCommandCenter.workerNames?.[String(id)] || (id ? `Unattributed historical user ${String(id).slice(0, 8)}` : "Unattributed historical record");
+  const rows = [
+    ...pathHistory.map((line) => ({ title: "Historical optical record", detail: line, meta: "Diagnostic workbook / historical reference" })),
+    ...(NODE54_IMPORTED_EVIDENCE[stop.np] || []).map((item) => ({ title: item.technician || "Unattributed historical record", detail: `${item.photos || 0} field photo${item.photos === 1 ? "" : "s"}${item.note ? ` - ${item.note}` : ""}`, meta: `Imported RUIDOSO photo report - ${item.date || "date unavailable"}` })),
+    ...(record?.codes || []).map((row) => ({ title: "Imported production code", detail: row.code || "Code", meta: `site_codes${row.created_at ? ` - ${new Date(row.created_at).toLocaleString()}` : ""}` })),
+    ...(record?.workLogs || []).map((row) => ({ title: workerName(row.user_id), detail: row.work_completed || row.status_after || "Field work record", meta: `field_work_logs - ${row.completed_at || row.created_at || "time unavailable"}` })),
+    ...(record?.closeouts || []).map((row) => ({ title: workerName(row.user_id), detail: row.visit_label || row.checklist?.final_status || "Closeout record", meta: `splicer_location_closeout_checklists - ${row.submitted_at || row.created_at || "time unavailable"}` })),
+    ...(record?.media || []).map((row) => ({ title: "Historical photo", detail: row.media_path || "Photo evidence", meta: `site_media - ${row.created_at || "time unavailable"}` })),
+  ];
+  const local = (state.node54Diagnostics.deviceChecks || []).filter((check) => check.stopId === stop.id).slice().reverse();
+  return `<details class="node54-history node54-evidence-history"><summary>Previous Field Evidence (${rows.length + local.length})</summary><div class="node54-evidence-source">Records are appended and never replace historical evidence. Missing worker identity is shown as unattributed.</div>${rows.length ? rows.map((row) => `<div class="node54-history-row"><b>${escapeHtml(row.title)}</b><span>${escapeHtml(row.detail)}</span><small>${escapeHtml(row.meta)}</small></div>`).join("") : `<div class="muted small">No linked site evidence was available for this staking point.</div>`}${local.map((check) => `<div class="node54-history-row is-current"><b>${escapeHtml(check.technician || "Current ROOT field check")}</b><span>Input ${check.inputDbm ?? "-"} dBm; through ${check.throughDbm ?? "-"} dBm; ${escapeHtml(check.interpretation?.label || "Recorded")}</span><small>${escapeHtml(new Date(check.timestamp).toLocaleString())}</small></div>`).join("")}</details>`;
+}
+
+function renderNode54DeviceCard(stop){
+  if (!stop.expectedRatio) return "";
+  const latest = getNode54LatestDeviceCheck(stop.id);
+  const expected = NODE54_TAP_RATIO_ESTIMATES[stop.expectedRatio];
+  return `<section class="node54-device-card">
+    <div class="map-field-card-kicker">PCOT / TAP FIELD VERIFICATION</div>
+    <h3>${escapeHtml(stop.device)} - designed ${escapeHtml(stop.expectedRatio)} through/tap ratio</h3>
+    <p>Design ratio comes from imported production codes. Confirm the installed label; estimated through-loss is about ${Number(expected?.throughLossDb || 0).toFixed(1)} dB, not a manufacturer tolerance.</p>
+    <div class="node54-device-grid"><label>Actual installed ratio<select id="node54ActualRatio" class="input"><option value="">Unknown</option>${Object.keys(NODE54_TAP_RATIO_ESTIMATES).map((ratio) => `<option value="${ratio}">${ratio}</option>`).join("")}</select></label><label>Direction verification<select id="node54Direction" class="input"><option value="unknown">Unknown</option><option value="confirmed">Input to through/out confirmed</option><option value="reversed">Possible reversed terminal</option></select></label><label>INPUT power at 1550 nm<input id="node54DeviceInput" class="input" type="number" inputmode="decimal" step="0.01" placeholder="dBm" /></label><label>THROUGH/OUT power at 1550 nm<input id="node54DeviceThrough" class="input" type="number" inputmode="decimal" step="0.01" placeholder="dBm" /></label><label>Tap/drop power (if accessible)<input id="node54DeviceTap" class="input" type="number" inputmode="decimal" step="0.01" placeholder="dBm" /></label><label>Physical input/through port IDs<input id="node54DevicePorts" class="input" type="text" placeholder="Input / through / tap" /></label></div>
+    <div class="node54-verify-list"><label><input id="node54LabelVerified" type="checkbox" /> Equipment and manufacturer label photographed</label><label><input id="node54FiberVerified" type="checkbox" /> Fiber and splice/port assignment verified where visible</label></div>
+    <button class="btn node54-primary node54-save" type="button" data-map-field-action="node54SaveDevice">RECORD DEVICE CHECK</button>
+    <button class="btn secondary node54-open-ebc" type="button" onclick="openLocationInEbc('${escapeHtml(stop.np)}')">OPEN IN EBC</button>
+    ${latest ? `<div class="node54-last-result"><b>Latest device check:</b> ${escapeHtml(latest.interpretation?.label || "Recorded")}${latest.interpretation?.deltaDb !== null && latest.interpretation?.deltaDb !== undefined ? ` - ${Number(latest.interpretation.deltaDb).toFixed(2)} dB through loss` : ""}</div>` : ""}
+  </section>`;
+}
+
 function renderNode54DiagnosticPanel(){
   const diag = state.node54Diagnostics;
   const stop = getNode54Stop();
@@ -26700,6 +26888,7 @@ function renderNode54DiagnosticPanel(){
   const site = findNode54Site(stop);
   const coords = getSiteCoords(site);
   const currentGps = state.map.myLocation;
+  const distanceMeters = getNode54DistanceMeters(stop);
   const history = getNode54HistoryForPath(stepItem.path);
   const previous = getNode54LatestReading(stepItem.id);
   const suggested = NODE54_STOPS.find((item) => item.id === diag.suggestedStopId);
@@ -26720,8 +26909,12 @@ function renderNode54DiagnosticPanel(){
       <span><b>NP</b>${escapeHtml(stop.np || "—")}</span><span><b>CP</b>${escapeHtml(stop.cp || "—")}</span><span><b>PON</b>${escapeHtml(stop.pon)}</span><span><b>Device</b>${escapeHtml(stop.device)}</span>
       <span><b>Cable ID</b>Not confirmed</span><span><b>PCOT ratio</b>Not confirmed</span>
       <span class="wide"><b>Project GPS</b>${coords ? `${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}` : "Unavailable"}</span>
+      <span class="wide"><b>Address / road</b>${escapeHtml(site?.address || site?.street || "Not stored in the project record")}</span>
       <span class="wide"><b>Current device GPS</b>${currentGps ? `${Number(currentGps.lat).toFixed(6)}, ${Number(currentGps.lng).toFixed(6)}${Number.isFinite(currentGps.accuracy_m) ? ` (±${Math.round(currentGps.accuracy_m)}m)` : ""}` : "Not captured yet"}</span>
+      <span class="wide"><b>Distance from current device</b>${distanceMeters === null ? "Capture device GPS to calculate" : formatDistanceFeetMeters(distanceMeters)}</span>
     </div>
+    <button class="btn secondary" type="button" data-map-field-action="node54Focus" data-stop-id="${escapeHtml(stop.id)}">NAVIGATE HERE ON MAP</button>
+    ${renderNode54DeviceCard(stop)}
     <section class="node54-test-card">
       <div class="node54-step-count">TEST ${stepIndex + 1} OF ${stop.steps.length}</div>
       <h3>${escapeHtml(stepItem.label)}</h3>
@@ -26737,6 +26930,7 @@ function renderNode54DiagnosticPanel(){
       ${previous ? `<div class="node54-last-result"><b>Latest current-session reading:</b> ${Number(previous.measurementDbm).toFixed(2)} dBm · ${escapeHtml(previous.interpretation?.label || "Recorded")}</div>` : ""}
     </section>
     <details class="node54-history"><summary>Historical readings (immutable; LOW/HIGH meaning unknown)</summary>${history.map((line) => `<div>${escapeHtml(line)}</div>`).join("") || "<div>No listed historical comparison.</div>"}</details>
+    ${renderNode54PreviousEvidence(stop)}
     <details class="node54-guidance-rules"><summary>How the guidance is calculated</summary><p>For paired before/after tests, the first-pass guidance treats an incoming reading at or below ${NODE54_THRESHOLDS.weakAbsoluteDbm} dBm as already weak upstream, a loss of ${NODE54_THRESHOLDS.materialLossDb} dB or more as a material interval loss, and a change within ${NODE54_THRESHOLDS.approximatelyEqualDb} dB with usable absolute signal as approximately equal. These are conservative guidance thresholds, not stored plant facts; verify the test setup before acting.</p></details>
     <div class="node54-p0004-warning"><strong>SEPARATE P0004 ISSUE</strong><span>1687 → 1688 → 12801 belongs to 1635CA_04 / P0004 and is intentionally excluded from this P0002 trace.</span></div>
     ${suggested ? `<div class="node54-next-card"><b>Suggested next location</b><span>${escapeHtml(suggested.title)}</span><button class="btn node54-primary" type="button" data-map-field-action="node54Navigate" data-stop-id="${suggested.id}">NAVIGATE TO NEXT TEST</button></div>` : ""}
@@ -26799,6 +26993,52 @@ async function saveNode54Reading(){
   toast("Diagnostic reading saved", `${stepItem.path} ${measurementDbm.toFixed(2)} dBm saved to this device.`);
 }
 
+function getNode54FieldNumber(id){
+  const raw = String($(id)?.value || "").trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+function saveNode54DeviceCheck(){
+  const stop = getNode54Stop();
+  if (!stop.expectedRatio) return;
+  const inputDbm = getNode54FieldNumber("node54DeviceInput");
+  const throughDbm = getNode54FieldNumber("node54DeviceThrough");
+  const tapDbm = getNode54FieldNumber("node54DeviceTap");
+  const actualRatio = String($("node54ActualRatio")?.value || "");
+  const direction = String($("node54Direction")?.value || "unknown");
+  if ([inputDbm, throughDbm, tapDbm].some((value) => value !== null && (value > 5 || value < -80))){
+    toast("Invalid optical reading", "Use a dBm value between -80 and +5.", "error");
+    return;
+  }
+  const interpretation = assessNode54Device({ inputDbm, throughDbm, expectedRatio: stop.expectedRatio, actualRatio, direction });
+  const neighbors = getNode54StopNeighbors(stop.id);
+  if (interpretation.nextAction === "upstream" && neighbors.upstreamId) state.node54Diagnostics.suggestedStopId = neighbors.upstreamId;
+  else if (interpretation.nextAction === "downstream" && neighbors.downstreamId) state.node54Diagnostics.suggestedStopId = neighbors.downstreamId;
+  else state.node54Diagnostics.suggestedStopId = stop.id;
+  const check = {
+    id: globalThis.crypto?.randomUUID?.() || `device_check_${Date.now()}`,
+    sessionId: state.node54Diagnostics.sessionId,
+    timestamp: nowISO(), projectId: state.activeProject?.id || "", stopId: stop.id,
+    location: stop.title, siteId: findNode54Site(stop)?.id || null, np: stop.np, cp: stop.cp,
+    path: stop.steps[0]?.path || "", expectedRatio: stop.expectedRatio, actualRatio, direction,
+    inputDbm, throughDbm, tapDbm, portIdentification: String($("node54DevicePorts")?.value || "").trim(),
+    labelPhotographed: Boolean($("node54LabelVerified")?.checked), fiberVerified: Boolean($("node54FiberVerified")?.checked),
+    gps: state.map.myLocation ? { lat: Number(state.map.myLocation.lat), lng: Number(state.map.myLocation.lng), accuracy_m: Number(state.map.myLocation.accuracy_m) || null } : null,
+    technician: state.profile?.display_name || state.user?.email || state.user?.id || "Unknown user",
+    photo: state.node54Diagnostics.pendingPhoto ? { ...state.node54Diagnostics.pendingPhoto, storage: "device_indexeddb" } : null,
+    interpretation,
+  };
+  state.node54Diagnostics.deviceChecks.push(check);
+  state.node54Diagnostics.pendingPhoto = null;
+  persistNode54Session();
+  renderMapFieldPanel();
+  renderNode54MapOverlay();
+  const action = interpretation.nextAction === "upstream" ? "Go upstream" : interpretation.nextAction === "downstream" ? "Go downstream" : "Remain here";
+  toast("Device check recorded", `${interpretation.label}. ${action}.`);
+}
+
 const ROOT_CC_XRAY_COLORS = Object.freeze({
   critical: "#ef4444",
   attention: "#f59e0b",
@@ -26820,6 +27060,7 @@ function resetRootCommandCenterProject(){
   state.rootCommandCenter.analysis = null;
   state.rootCommandCenter.unavailable = [];
   state.rootCommandCenter.fieldBrief = null;
+  state.rootCommandCenter.workerNames = {};
   state.rootCommandCenter.xrayEnabled = false;
 }
 
@@ -26881,6 +27122,12 @@ async function loadRootCommandCenterData({ silent = false, force = false } = {})
     if (token !== state.rootCommandCenter.loadToken || projectId !== String(state.activeProject?.id || "")) return null;
     [media, codes, workLogs, closeouts, redlines] = sources.map((source) => source.rows);
     sources.filter((source) => source.error).forEach((source) => unavailable.push(source.label));
+    const historicalUserIds = [...new Set([...workLogs, ...closeouts].map((row) => String(row?.user_id || "")).filter(Boolean))];
+    if (historicalUserIds.length){
+      const profiles = await runRootCommandCenterSource("Worker profiles", state.client.from("profiles").select("id, display_name").in("id", historicalUserIds));
+      if (profiles.error) unavailable.push(profiles.label);
+      state.rootCommandCenter.workerNames = Object.fromEntries(profiles.rows.map((row) => [String(row.id), String(row.display_name || "").trim() || `User ${String(row.id).slice(0, 8)}`]));
+    }
   }
   const analysis = analyzeRootProject({ project: state.activeProject, sites, media, codes, workLogs, closeouts, redlines, opticalConcernThresholdDbm: TEST_RESULT_REVISIT_THRESHOLD_DB });
   if (token !== state.rootCommandCenter.loadToken || projectId !== String(state.activeProject?.id || "")) return null;
@@ -37674,6 +37921,10 @@ async function initAuth(){
   }
 
   state.client = await makeClient();
+  // Runtime configuration is fetched asynchronously. Refresh the banner after
+  // client creation so a valid local dev config does not retain the startup
+  // "missing" warning.
+  setEnvWarning();
   if (!state.client){
     if (isDemo){
       await enterDemoBootstrapSession({ persistSession: false });
@@ -37714,6 +37965,7 @@ async function initAuth(){
     if (!state.user){
       storePostAuthRedirect();
     }
+    rememberLastWorkspaceHash();
     if (syncInvoiceDeepLinkFromUrl({ activateView: true })) return;
     if (syncRedlineDeepLinkFromUrl({ activateView: true })) return;
     const hashView = parseViewFromHash();
@@ -38089,7 +38341,15 @@ async function postLoginBootstrap(client, user){
     }
     if (!_postLoginBootstrapDone) {
       _postLoginBootstrapDone = true;
-      setActiveView(getDefaultView({ allowHash: true }));
+      const _deepLinkView = parseViewFromHash();
+      const _landingView = getDefaultView({ allowHash: true });
+      console.info("[landing] resolved", {
+        tier: resolveRoleTier(state.profile),
+        deep_link: _deepLinkView && isViewAllowed(_deepLinkView) ? window.location.hash : null,
+        last_workspace: readLastWorkspaceHash() || null,
+        view: _landingView,
+      });
+      setActiveView(_landingView);
       const _wsIntent = sessionStorage.getItem("sc_workspace_intent");
       if (_wsIntent) {
         sessionStorage.removeItem("sc_workspace_intent");
@@ -39811,8 +40071,16 @@ function wireUI(){
           await saveNode54Reading();
           return;
         }
+        if (action === "node54SaveDevice"){
+          saveNode54DeviceCheck();
+          return;
+        }
         if (action === "node54Navigate"){
           selectNode54Stop(actionBtn.dataset.stopId || state.node54Diagnostics.suggestedStopId);
+          return;
+        }
+        if (action === "node54Focus"){
+          focusNode54Stop(actionBtn.dataset.stopId || state.node54Diagnostics.currentStopId);
           return;
         }
         if (action === "startFieldDay"){
@@ -42161,3 +42429,754 @@ async function subscribePresence(){
       }
     });
 }
+
+/* ==========================================================================
+   EBC — Engineer Budget Calculator (UI layer)
+   --------------------------------------------------------------------------
+   This block renders and drives the EBC screen. It contains NO optical math:
+   every number on screen comes from services/ebc/. Keeping the split strict is
+   what lets the node map, location cards and automated Node analysis reuse the
+   same engine later without duplicating a single formula.
+
+   Data safety: the EBC never writes to sites, site_codes, field_work_logs or
+   any Node 54 record. A technician's inputs live in a local draft that is
+   layered OVER the source leg at render time, so a designed ratio, a historical
+   reading or an imported production code cannot be overwritten by this screen.
+   ========================================================================== */
+
+const EBC_DRAFT_STORAGE_KEY = "speccom:ebc-drafts:v1";
+let _ebcEventsBound = false;
+
+function ebcNum(value){
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function ebcDbm(value){
+  return value === null || value === undefined ? "—" : `${Number(value).toFixed(2)} dBm`;
+}
+
+function ebcSigned(value, unit = "dB"){
+  if (value === null || value === undefined) return "—";
+  const numeric = Number(value);
+  return `${numeric > 0 ? "+" : ""}${numeric.toFixed(2)} ${unit}`;
+}
+
+function ebcStatusClass(status){
+  return `is-${String(status || "unknown").toLowerCase()}`;
+}
+
+/* -------------------------------------------------------------------------
+   Draft storage. Local to this device, exactly like the first version of the
+   Node 54 diagnostic evidence store.
+   ------------------------------------------------------------------------- */
+
+function loadEbcDrafts(){
+  try {
+    const raw = localStorage.getItem(EBC_DRAFT_STORAGE_KEY);
+    state.ebc.drafts = raw ? (JSON.parse(raw) || {}) : {};
+  } catch (error){
+    state.ebc.drafts = {};
+  }
+}
+
+function saveEbcDrafts(){
+  try {
+    localStorage.setItem(EBC_DRAFT_STORAGE_KEY, JSON.stringify(state.ebc.drafts || {}));
+  } catch (error){
+    // A full or blocked storage quota must not stop the calculator working.
+    dlog("EBC draft save failed", error);
+  }
+}
+
+function getEbcDraft(legId){
+  state.ebc.drafts = state.ebc.drafts || {};
+  if (!state.ebc.drafts[legId]) state.ebc.drafts[legId] = { nodes: {} };
+  if (!state.ebc.drafts[legId].nodes) state.ebc.drafts[legId].nodes = {};
+  return state.ebc.drafts[legId];
+}
+
+/* -------------------------------------------------------------------------
+   Source legs and the draft overlay.
+   ------------------------------------------------------------------------- */
+
+function getEbcSourceLegs(){
+  // Only Node 54 topology is proven by project data today. Other projects get
+  // the calculator with an empty cascade rather than an invented one.
+  return buildNode54Legs();
+}
+
+function getEbcSourceLeg(legId){
+  return getEbcSourceLegs().find((leg) => leg.legId === legId) || null;
+}
+
+/**
+ * Merge the technician's draft over the source leg.
+ * designedRatio, historical readings and imported evidence are copied straight
+ * from source on every render and are not reachable from the draft, so this
+ * screen structurally cannot overwrite them.
+ */
+function buildEbcLeg(legId){
+  const source = getEbcSourceLeg(legId);
+  if (!source) return null;
+  const draft = getEbcDraft(legId);
+  return {
+    ...source,
+    wavelengthNm: draft.wavelengthNm ?? source.wavelengthNm,
+    launch: { ...source.launch, powerDbm: draft.launchPowerDbm ?? source.launch.powerDbm },
+    fiber: { ...source.fiber, ...(draft.fiber || {}) },
+    defaults: { ...source.defaults, ...(draft.defaults || {}) },
+    limits: { ...source.limits, ...(draft.limits || {}) },
+    nodes: source.nodes.map((node) => {
+      const overlay = draft.nodes[node.id] || {};
+      return {
+        ...node,
+        designedRatio: node.designedRatio,
+        installedRatio: overlay.installedRatio || null,
+        span: { ...node.span, ...(overlay.span || {}) },
+        tapDrop: overlay.tapDrop || null,
+        measured: overlay.measured || null,
+        notes: overlay.notes || "",
+      };
+    }),
+  };
+}
+
+function ebcActiveLegId(){
+  const legs = getEbcSourceLegs();
+  if (!legs.length) return "";
+  const current = state.ebc.legId;
+  if (current && legs.some((leg) => leg.legId === current)) return current;
+  state.ebc.legId = legs[0].legId;
+  return state.ebc.legId;
+}
+
+/** Recalculate the whole cascade. Every downstream location updates together. */
+function ebcRecalculate(){
+  const legId = ebcActiveLegId();
+  const leg = buildEbcLeg(legId);
+  if (!leg){
+    state.ebc.result = null;
+    return null;
+  }
+  state.ebc.result = ebcCalculateLeg(leg, { mode: state.ebc.mode });
+  return state.ebc.result;
+}
+
+/* -------------------------------------------------------------------------
+   Rendering
+   ------------------------------------------------------------------------- */
+
+function renderEbcScreen(){
+  const root = $("ebcRoot");
+  if (!root) return;
+  if (!state.ebc.drafts || !Object.keys(state.ebc.drafts).length) loadEbcDrafts();
+
+  const legs = getEbcSourceLegs();
+  if (!legs.length){
+    root.innerHTML = `<div class="card ebc-card"><h1 id="ebcTitle">EBC — Engineer Budget Calculator</h1>
+      <div class="ebc-empty">No leg topology is available. The EBC only builds a cascade from documented project data, and none is present for the current project.</div></div>`;
+    bindEbcEvents();
+    return;
+  }
+
+  const legId = ebcActiveLegId();
+  const leg = buildEbcLeg(legId);
+  const result = ebcRecalculate();
+
+  root.innerHTML = `
+    <div class="ebc-shell">
+      ${renderEbcHeader(leg, legs, result)}
+      ${renderEbcPreliminaryBanner(result)}
+      ${renderEbcSpecBanner(result)}
+      ${renderEbcGaps(leg, result)}
+      ${renderEbcDataQuality(result)}
+      ${renderEbcInputs(leg)}
+      ${renderEbcSummary(result)}
+      <div class="ebc-cascade">
+        ${leg.nodes.map((node) => renderEbcNodeCard(node, result)).join("")}
+      </div>
+      ${renderEbcWhatIfPanel()}
+      ${renderEbcSpecTable()}
+    </div>`;
+
+  bindEbcEvents();
+  if (state.ebc.focusNodeId){
+    const card = root.querySelector(`[data-ebc-card="${state.ebc.focusNodeId}"]`);
+    if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
+    state.ebc.focusNodeId = "";
+  }
+}
+
+function renderEbcHeader(leg, legs, result){
+  const mode = state.ebc.mode;
+  return `<header class="ebc-header card ebc-card">
+    <div class="ebc-header-main">
+      <div class="map-field-card-kicker">ENGINEER BUDGET CALCULATOR</div>
+      <h1 id="ebcTitle">EBC · ${escapeHtml(leg.nodeName || "Node")} ${escapeHtml(leg.legId)}</h1>
+      <div class="muted small">${escapeHtml(leg.projectName || "")} · PON ${escapeHtml(leg.pon || "—")} · ${leg.wavelengthNm ? `${leg.wavelengthNm} nm` : "wavelength not set"}</div>
+    </div>
+    <div class="ebc-header-controls">
+      <label class="ebc-field">
+        <span>Project / node</span>
+        <select class="input compact" disabled><option>${escapeHtml(leg.projectName || "Project")} · ${escapeHtml(leg.nodeName || "Node")}</option></select>
+      </label>
+      <label class="ebc-field">
+        <span>Leg</span>
+        <select class="input compact" data-ebc-action="selectLeg">
+          ${legs.map((item) => `<option value="${escapeHtml(item.legId)}" ${item.legId === leg.legId ? "selected" : ""}>${escapeHtml(item.legId)} · ${item.nodes.length} PCOT${item.nodes.length === 1 ? "" : "s"}</option>`).join("")}
+        </select>
+      </label>
+      <div class="ebc-mode-toggle" role="group" aria-label="Calculator mode">
+        <button type="button" class="ebc-mode-btn ${mode === "design" ? "is-active" : ""}" data-ebc-action="mode" data-mode="design">Design</button>
+        <button type="button" class="ebc-mode-btn ${mode === "field" ? "is-active" : ""}" data-ebc-action="mode" data-mode="field">Field</button>
+      </div>
+    </div>
+    <div class="ebc-action-row">
+      <button class="btn ebc-primary" type="button" data-ebc-action="calculate" data-busy-label="Calculating…">CALCULATE</button>
+      <button class="btn secondary" type="button" data-ebc-action="recommendLeg" data-busy-label="Solving…">RECOMMEND PCOT</button>
+      <button class="btn ghost" type="button" data-ebc-action="resetDraft">RESET MY INPUTS</button>
+    </div>
+    <div class="ebc-source-note">Topology and designed ratios are read from the project record. ${escapeHtml(leg.source || "")}</div>
+  </header>`;
+}
+
+function renderEbcSpecBanner(result){
+  const unspecified = ebcUnspecifiedRatios();
+  const unverified = result?.unverifiedRatios || [];
+  if (!unverified.length && !unspecified.length) return "";
+  return `<div class="ebc-banner is-unverified">
+    <strong>PCOT SPECIFICATIONS ARE NOT ENGINEERING APPROVED</strong>
+    <span>${unverified.length ? `In use and UNVERIFIED: ${escapeHtml(unverified.join(", "))}. ` : ""}${unspecified.length ? `No loss data at all: ${escapeHtml(unspecified.join(", "))} — these are refused by the calculator until configured.` : ""}</span>
+    <span class="ebc-banner-sub">TAP loss now comes from the TDS pricelist (CommScope, ${escapeHtml(TDS_PRICELIST_SOURCE.file)}) and is TDS verified for devices whose splitter size is recorded. THROUGH loss is still an unverified repository estimate — that source states no through figure, no worst-case insertion loss and no wavelength. Obtain those before treating any result as engineering approved.</span>
+  </div>`;
+}
+
+function renderEbcGaps(leg, result){
+  const blocking = result?.validation?.blocking || [];
+  const warnings = result?.validation?.warnings || [];
+  const gaps = leg.dataGaps || [];
+  if (!blocking.length && !warnings.length && !gaps.length) return "";
+  return `<details class="ebc-gaps" ${blocking.length ? "open" : ""}>
+    <summary>${blocking.length ? `${blocking.length} missing input${blocking.length === 1 ? "" : "s"} blocking this calculation` : `Assumptions and known data gaps (${warnings.length + gaps.length})`}</summary>
+    ${blocking.length ? `<div class="ebc-gap-group"><h4>Required before the EBC will answer</h4>${blocking.map((item) => `<div class="ebc-gap is-blocking">${escapeHtml(item.message)}</div>`).join("")}</div>` : ""}
+    ${warnings.length ? `<div class="ebc-gap-group"><h4>Caveats applied to this result</h4>${warnings.map((item) => `<div class="ebc-gap is-warning">${escapeHtml(item.message)}</div>`).join("")}</div>` : ""}
+    ${gaps.length ? `<div class="ebc-gap-group"><h4>Engineering data this project does not contain</h4>${gaps.map((item) => `<div class="ebc-gap">${escapeHtml(item)}</div>`).join("")}</div>` : ""}
+  </details>`;
+}
+
+function ebcInput(label, path, value, { placeholder = "", step = "0.01", type = "number", nodeId = "" } = {}){
+  return `<label class="ebc-field">
+    <span>${escapeHtml(label)}</span>
+    <input class="input compact" type="${type}" ${type === "number" ? `inputmode="decimal" step="${step}"` : ""}
+      data-ebc-input="${escapeHtml(path)}" ${nodeId ? `data-ebc-node="${escapeHtml(nodeId)}"` : ""}
+      value="${value === null || value === undefined ? "" : escapeHtml(String(value))}" placeholder="${escapeHtml(placeholder)}" />
+  </label>`;
+}
+
+/**
+ * Where every number in this result came from, grouped by what kind of data it
+ * is. This is the panel a technician opens when they want to know whether a
+ * figure is a measurement, a design value or a placeholder.
+ */
+function renderEbcDataQuality(result){
+  if (!result || !result.dataQuality) return "";
+  const quality = result.dataQuality;
+  const groups = [
+    [EBC_DATA_CLASS.FIELD_DATA, "Measured in the field"],
+    [EBC_DATA_CLASS.DESIGN_DATA, "From the TDS design record"],
+    [EBC_DATA_CLASS.ENGINEERING_CONSTANT, "Verified engineering specification"],
+    [EBC_DATA_CLASS.ESTIMATE, "Standing in for a missing specification"],
+  ];
+  const unknown = EBC_REQUIRED_UNKNOWN_CONSTANTS.filter((item) => !item.available);
+  return `<details class="ebc-quality">
+    <summary>Where these numbers come from · ${quality.counts.designData} design · ${quality.counts.fieldData} measured · ${quality.counts.engineeringConstants} verified · ${quality.counts.estimates} estimated</summary>
+    ${groups.map(([dataClass, title]) => {
+      const rows = quality.inputs.filter((item) => item.dataClass === dataClass);
+      if (!rows.length) return "";
+      return `<div class="ebc-quality-group is-${escapeHtml(dataClass.toLowerCase())}">
+        <h4>${escapeHtml(title)} <span class="ebc-tag">${escapeHtml(EBC_DATA_CLASS_LABELS[dataClass] || dataClass)}</span></h4>
+        ${rows.map((row) => `<div class="ebc-quality-row"><b>${escapeHtml(row.label)}</b><span>${escapeHtml(row.detail)}</span></div>`).join("")}
+      </div>`;
+    }).join("")}
+    <div class="ebc-quality-group is-unknown">
+      <h4>Not available anywhere — must be supplied</h4>
+      ${unknown.map((item) => `<div class="ebc-quality-row"><b>${escapeHtml(item.label)}${item.units ? ` (${escapeHtml(item.units)})` : ""}</b><span>${escapeHtml(item.notes)}</span></div>`).join("")}
+    </div>
+    <div class="ebc-quality-group is-hardware">
+      <h4>Hardware identification</h4>
+      <div class="ebc-quality-row"><b>Manufacturer: ${escapeHtml(EBC_HARDWARE_IDENTIFICATION.manufacturer || "UNKNOWN")}</b><span>${escapeHtml(EBC_HARDWARE_IDENTIFICATION.manufacturerSource || "")} Alternate: ${escapeHtml(EBC_HARDWARE_IDENTIFICATION.alternateManufacturer || "none listed")}</span></div>
+      <div class="ebc-quality-row"><b>Enclosure</b><span>${escapeHtml(EBC_HARDWARE_IDENTIFICATION.enclosure || "UNKNOWN")}</span></div>
+      <div class="ebc-quality-row"><b>HxFO prefix</b><span>${escapeHtml(EBC_HARDWARE_IDENTIFICATION.prefixResolution.conclusion)}</span></div>
+      <div class="ebc-quality-row"><b>${escapeHtml(EBC_HARDWARE_IDENTIFICATION.reportedFieldHardware.partNumber)}</b><span>${escapeHtml(TDS_COMMSCOPE_CORRELATION.conclusion)} — agrees on ${escapeHtml(TDS_COMMSCOPE_CORRELATION.agreesOn.join(", "))}; differs on ${escapeHtml(TDS_COMMSCOPE_CORRELATION.differsOn.join(", "))}. ${escapeHtml(TDS_COMMSCOPE_CORRELATION.stillNeeded)}</span></div>
+      <div class="ebc-quality-row"><b>TDS tap loss table (1x4)</b><span>${Object.entries(TDS_TAP_LOSS_DB[4]).map(([ratio, db]) => `${escapeHtml(ratio)} = ${db} dB`).join(" · ")} — ${escapeHtml(TDS_PRICELIST_SOURCE.file)}. Through loss is not stated in this source.</span></div>
+    </div>
+    <div class="ebc-quality-group is-candidate">
+      <h4>Candidate limits found in project material — not applied</h4>
+      ${EBC_CANDIDATE_LIMITS.map((item) => `<div class="ebc-quality-row"><b>${escapeHtml(item.label)}: ${item.value} ${escapeHtml(item.units)}</b><span>${escapeHtml(ebcDescribeProvenance(item))} — ${escapeHtml(item.notes)}</span></div>`).join("")}
+    </div>
+  </details>`;
+}
+
+function renderEbcInputs(leg){
+  const unit = leg.fiber?.distanceUnit || "km";
+  return `<section class="card ebc-card">
+    <div class="map-field-card-kicker">ENGINEERING INPUTS</div>
+    <h2>Launch power and limits</h2>
+    <p class="muted small">${escapeHtml(leg.launch?.reference || "")}</p>
+    <div class="ebc-grid">
+      ${ebcInput("OLT / node launch power (dBm)", "launchPowerDbm", leg.launch?.powerDbm, { placeholder: "-8.40" })}
+      ${ebcInput("Wavelength (nm)", "wavelengthNm", leg.wavelengthNm, { step: "1", placeholder: "1550" })}
+      <label class="ebc-field">
+        <span>Distance unit</span>
+        <select class="input compact" data-ebc-input="fiber.distanceUnit">
+          ${["km", "mi", "ft", "m"].map((option) => `<option value="${option}" ${option === unit ? "selected" : ""}>${option}</option>`).join("")}
+        </select>
+      </label>
+      ${ebcInput("Attenuation (dB/km)", "fiber.attenuationDbPerKm", leg.fiber?.attenuationDbPerKm, { placeholder: "0.25" })}
+      ${ebcInput("Attenuation (dB/mile)", "fiber.attenuationDbPerMile", leg.fiber?.attenuationDbPerMile, { placeholder: "0.40" })}
+      ${ebcInput("Loss per splice (dB)", "defaults.spliceLossDb", leg.defaults?.spliceLossDb, { placeholder: "0.10" })}
+      ${ebcInput("Loss per connector (dB)", "defaults.connectorLossDb", leg.defaults?.connectorLossDb, { placeholder: "0.25" })}
+      ${ebcInput("Receiver minimum (dBm)", "limits.receiverMinDbm", leg.limits?.receiverMinDbm, { placeholder: "-28.00" })}
+      ${ebcInput("Receiver maximum (dBm)", "limits.receiverMaxDbm", leg.limits?.receiverMaxDbm, { placeholder: "-8.00" })}
+      ${ebcInput("Engineering reserve (dB)", "limits.engineeringReserveDb", leg.limits?.engineeringReserveDb, { placeholder: "3.00" })}
+    </div>
+    <div class="ebc-inline-note">Engineering reserve is the PASS threshold. A location above the receiver minimum but short of the reserve is reported MARGINAL, and the reserve is never subtracted twice.</div>
+  </section>`;
+}
+
+/**
+ * The single most important thing on the screen when the numbers are not
+ * engineering approved. It states the fact once, at the top, in the same
+ * language everywhere, and links to exactly what is missing.
+ */
+function renderEbcPreliminaryBanner(result){
+  if (!result || !result.dataQuality) return "";
+  if (!result.dataQuality.preliminary){
+    return `<div class="ebc-status-strip is-approved">
+      <strong>ENGINEERING APPROVED INPUTS</strong>
+      <span>Every PCOT loss value in this cascade comes from a verified specification.</span>
+    </div>`;
+  }
+  return `<div class="ebc-status-strip is-preliminary" role="status">
+    <strong>${escapeHtml(result.dataQuality.headline)}</strong>
+    <span>${result.dataQuality.reasons.map((reason) => escapeHtml(reason)).join(" ")}</span>
+    <span class="ebc-status-strip-sub">Use for troubleshooting and comparison. Do not submit as an approved engineering calculation.</span>
+  </div>`;
+}
+
+function renderEbcSummary(result){
+  if (!result) return "";
+  const blocked = !result.ok;
+  return `<section class="ebc-summary ${blocked ? "is-blocked" : ""}">
+    <div class="ebc-summary-tile">
+      <span>Leg status</span>
+      <strong class="ebc-status ${ebcStatusClass(result.status)}">${blocked ? "INCOMPLETE" : escapeHtml(result.status)}</strong>
+    </div>
+    <div class="ebc-summary-tile">
+      <span>Weakest location</span>
+      <strong>${result.weakest ? `${escapeHtml(result.weakest.label)} · ${ebcSigned(result.weakest.marginDb)}` : "—"}</strong>
+    </div>
+    <div class="ebc-summary-tile">
+      <span>End-of-leg power</span>
+      <strong>${ebcDbm(result.endOfLeg?.powerDbm)}</strong>
+    </div>
+    <div class="ebc-summary-tile">
+      <span>End-of-leg margin</span>
+      <strong class="ebc-status ${ebcStatusClass(result.endOfLeg?.status)}">${ebcSigned(result.endOfLeg?.marginDb)}</strong>
+    </div>
+    <div class="ebc-summary-tile">
+      <span>Confidence</span>
+      <strong>${escapeHtml(result.confidence || "—")}</strong>
+    </div>
+  </section>`;
+}
+
+function renderEbcNodeCard(node, result){
+  const calculated = result ? ebcFindNode(result, node.id) : null;
+  const recommendation = state.ebc.recommendation && state.ebc.recommendation.nodeId === node.id ? state.ebc.recommendation : null;
+  const traceOpen = Boolean(state.ebc.openTrace[node.id]);
+  const ratioOptions = ["", ...PCOT_RATIOS];
+
+  return `<article class="ebc-node-card ${calculated ? ebcStatusClass(calculated.status) : ""}" data-ebc-card="${escapeHtml(node.id)}">
+    <div class="ebc-node-head">
+      <div>
+        <h3>${escapeHtml(node.label)}${node.tdsPosition ? ` <span class="ebc-tag">${escapeHtml(node.tdsPosition)}</span>` : ""}</h3>
+        <div class="ebc-ratio-line">
+          <span>Designed: <b>${escapeHtml(node.designedRatio || "not recorded")}</b></span>
+          <span>Installed: <b>${escapeHtml(node.installedRatio || "not confirmed")}</b></span>
+        </div>
+        ${node.partNumber ? `<div class="ebc-part-line">TDS part <b>${escapeHtml(node.partNumber)}</b>${node.cp ? ` · CP${escapeHtml(node.cp)}` : ""}${node.span?.distance !== null && node.span?.distanceUnit ? ` · ${node.span.distance} ${escapeHtml(node.span.distanceUnit)} from upstream (TDS cable footage)` : ""}</div>` : ""}
+      </div>
+      <div class="ebc-status-block">
+        <span class="ebc-status ${calculated ? ebcStatusClass(calculated.status) : "is-unknown"}">${escapeHtml(calculated?.status || "UNKNOWN")}</span>
+        <span class="ebc-margin">Engineering margin ${ebcSigned(calculated?.marginDb)}</span>
+      </div>
+    </div>
+
+    <div class="ebc-readout">
+      <div><span>Input</span><b>${ebcDbm(calculated?.inputDbm)}</b></div>
+      <div><span>Through</span><b>${ebcDbm(calculated?.throughOutputDbm)}</b></div>
+      <div><span>Tap</span><b>${ebcDbm(calculated?.tapOutputDbm)}</b></div>
+    </div>
+    ${calculated?.statusReason ? `<div class="ebc-status-reason">${escapeHtml(calculated.statusReason)}</div>` : ""}
+
+    <details class="ebc-node-inputs">
+      <summary>Span and device inputs</summary>
+      <div class="ebc-grid">
+        <label class="ebc-field">
+          <span>Installed ratio (field observation)</span>
+          <select class="input compact" data-ebc-input="installedRatio" data-ebc-node="${escapeHtml(node.id)}">
+            ${ratioOptions.map((ratio) => `<option value="${ratio}" ${ratio === (node.installedRatio || "") ? "selected" : ""}>${ratio || "Not confirmed"}</option>`).join("")}
+          </select>
+        </label>
+        ${ebcInput("Distance from upstream location", "span.distance", node.span?.distance, { nodeId: node.id, placeholder: "0.00" })}
+        ${ebcInput("Splices in this span", "span.spliceCount", node.span?.spliceCount, { nodeId: node.id, step: "1", placeholder: "0" })}
+        ${ebcInput("Connectors in this span", "span.connectorCount", node.span?.connectorCount, { nodeId: node.id, step: "1", placeholder: "0" })}
+        ${ebcInput("Terminal / drop loss on the tap (dB)", "tapDrop.terminalLossDb", node.tapDrop?.terminalLossDb, { nodeId: node.id, placeholder: "0.00" })}
+      </div>
+      ${node.historical ? `<div class="ebc-historical"><b>Historical record:</b> ${escapeHtml((node.historical.lines || []).join(" · ") || node.historical.values.join(" / "))}<br /><small>${escapeHtml(node.historical.note)}</small></div>` : ""}
+    </details>
+
+    ${state.ebc.mode === "field" ? renderEbcFieldSection(node, calculated) : ""}
+
+    <div class="ebc-node-actions">
+      <button class="btn secondary small" type="button" data-ebc-action="whatIf" data-node="${escapeHtml(node.id)}" data-busy-label="Comparing…">WHAT IF I CHANGE THIS PCOT?</button>
+      <button class="btn secondary small" type="button" data-ebc-action="recommend" data-node="${escapeHtml(node.id)}" data-busy-label="Solving…">RECOMMEND PCOT</button>
+      <button class="btn ghost small" type="button" data-ebc-action="toggleTrace" data-node="${escapeHtml(node.id)}">${traceOpen ? "HIDE CALCULATION" : "SHOW CALCULATION"}</button>
+    </div>
+
+    ${traceOpen ? `<pre class="ebc-trace">${escapeHtml(calculated ? ebcFormatTrace(calculated.trace) : "No calculation is available yet.")}</pre>` : ""}
+    ${recommendation ? renderEbcRecommendation(recommendation) : ""}
+  </article>`;
+}
+
+function renderEbcFieldSection(node, calculated){
+  const measured = node.measured || {};
+  const comparison = calculated ? ebcCompare(calculated) : null;
+  const entered = ["inputDbm", "throughDbm", "tapDbm"].filter((key) => measured[key] !== null && measured[key] !== undefined && measured[key] !== "").length;
+  return `<section class="ebc-field-section">
+    <div class="ebc-field-head">
+      <div class="map-field-card-kicker">FIELD READINGS</div>
+      <div class="ebc-field-identity">NP ${escapeHtml(node.np || "—")}${node.cp ? ` · CP ${escapeHtml(node.cp)}` : ""}${node.tdsPosition ? ` · ${escapeHtml(node.tdsPosition)}` : ""}</div>
+      <span class="ebc-tag ${entered === 3 ? "is-ok" : ""}">${entered}/3 readings</span>
+    </div>
+    <div class="ebc-grid ebc-grid-readings">
+      ${ebcInput("INPUT (dBm)", "measured.inputDbm", measured.inputDbm, { nodeId: node.id, placeholder: "-00.00" })}
+      ${ebcInput("THROUGH (dBm)", "measured.throughDbm", measured.throughDbm, { nodeId: node.id, placeholder: "-00.00" })}
+      ${ebcInput("TAP (dBm)", "measured.tapDbm", measured.tapDbm, { nodeId: node.id, placeholder: "-00.00" })}
+    </div>
+    <div class="ebc-grid">
+      <label class="ebc-field">
+        <span>Measurement wavelength</span>
+        <select class="input compact" data-ebc-input="measured.wavelengthNm" data-ebc-node="${escapeHtml(node.id)}">
+          ${["", "1310", "1490", "1550", "1577"].map((value) => `<option value="${value}" ${String(measured.wavelengthNm || "") === value ? "selected" : ""}>${value ? value + " nm" : "Not recorded"}</option>`).join("")}
+        </select>
+      </label>
+      <label class="ebc-field">
+        <span>Installed ratio (read off the label)</span>
+        <select class="input compact" data-ebc-input="installedRatio" data-ebc-node="${escapeHtml(node.id)}">
+          ${["", ...PCOT_RATIOS].map((ratio) => `<option value="${ratio}" ${ratio === (node.installedRatio || "") ? "selected" : ""}>${ratio || "Not confirmed"}</option>`).join("")}
+        </select>
+      </label>
+      ${ebcInput("Port identification", "measured.portId", measured.portId, { nodeId: node.id, type: "text", placeholder: "Input / through / tap ports observed" })}
+      <label class="ebc-field">
+        <span>Direction / position</span>
+        <select class="input compact" data-ebc-input="measured.direction" data-ebc-node="${escapeHtml(node.id)}">
+          ${[["", "Not recorded"], ["downstream", "Tested downstream of the device"], ["upstream", "Tested upstream of the device"], ["reversed", "Possible reversed terminal"]]
+            .map(([value, label]) => `<option value="${value}" ${value === (measured.direction || "") ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+        </select>
+      </label>
+      ${ebcInput("Field note", "measured.notes", measured.notes, { nodeId: node.id, type: "text", placeholder: "Optional note" })}
+    </div>
+    <div class="ebc-inline-note">Readings are stored in your EBC draft and compared against the design. They never overwrite the TDS design record, the designed ratio or any existing field evidence.</div>
+    ${comparison && comparison.hasMeasurements ? `
+      <div class="ebc-table-scroll">
+        <table class="ebc-compare">
+          <thead><tr><th>Measurement</th><th>Predicted</th><th>Actual</th><th>Difference</th></tr></thead>
+          <tbody>
+            ${comparison.rows.map((row) => `<tr class="is-${escapeHtml(row.flag)}">
+              <td>${escapeHtml(row.measurement)}</td>
+              <td>${ebcDbm(row.predictedDbm)}</td>
+              <td>${ebcDbm(row.actualDbm)}</td>
+              <td>${ebcSigned(row.differenceDb)}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+      ${comparison.indicators.length ? `<div class="ebc-indicators">${comparison.indicators.map((item) => `
+        <div class="ebc-indicator is-${escapeHtml(String(item.confidence).toLowerCase())}">
+          <strong>${escapeHtml(item.title)}</strong>
+          <span class="ebc-indicator-confidence">${escapeHtml(item.confidence)}</span>
+          <p>${escapeHtml(item.detail)}</p>
+        </div>`).join("")}</div>` : `<div class="ebc-inline-note">No abnormal difference was detected against the predicted values.</div>`}
+    ` : `<div class="ebc-inline-note">Enter at least one reading to compare the field against the engineering prediction.</div>`}
+  </section>`;
+}
+
+function renderEbcRecommendation(recommendation){
+  if (recommendation.outcome === EBC_RECOMMENDATION_OUTCOME.INSUFFICIENT_DATA){
+    return `<div class="ebc-recommendation is-blocked">
+      <strong>NOT ENOUGH DATA TO RECOMMEND</strong>
+      <p>${escapeHtml(recommendation.reason)}</p>
+      ${(recommendation.missing || []).length ? `<ul>${recommendation.missing.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+    </div>`;
+  }
+  if (recommendation.outcome === EBC_RECOMMENDATION_OUTCOME.NO_SAFE_PCOT_CHANGE){
+    return `<div class="ebc-recommendation is-nosafe">
+      <strong>NO SAFE PCOT CHANGE</strong>
+      <p>${escapeHtml(recommendation.reason)}</p>
+      ${recommendation.limitingLocation ? `<div class="ebc-limiting">Limiting downstream location: <b>${escapeHtml(recommendation.limitingLocation.label)}</b> — ${escapeHtml(recommendation.limitingLocation.detail || "")}</div>` : ""}
+    </div>`;
+  }
+  const changed = recommendation.outcome === EBC_RECOMMENDATION_OUTCOME.CHANGE_RECOMMENDED;
+  // A recommendation is a result surface too, so it carries the same caveat as
+  // the cascade it was derived from.
+  const preliminary = recommendation.specVerified === false;
+  return `<div class="ebc-recommendation ${changed ? "is-change" : "is-hold"}">
+    ${preliminary ? `<div class="ebc-prelim-chip">PRELIMINARY — based on unverified PCOT loss data</div>` : ""}
+    <strong>${changed ? `Recommendation: ${escapeHtml(recommendation.recommendedPcot)}` : `Keep ${escapeHtml(recommendation.currentPcot)}`}</strong>
+    <p>${escapeHtml(recommendation.reason)}</p>
+    <div class="ebc-rec-grid">
+      <div><span>Current tap</span><b>${ebcDbm(recommendation.currentTapDeliveredDbm ?? recommendation.currentTapOutputDbm)}</b></div>
+      <div><span>Predicted tap</span><b>${ebcDbm(recommendation.predictedTapDeliveredDbm ?? recommendation.predictedTapOutputDbm)}</b></div>
+      <div><span>Predicted tap improvement</span><b>${ebcSigned(recommendation.tapImprovementDb)}</b></div>
+      <div><span>Downstream penalty</span><b>${ebcSigned(recommendation.downstreamPenaltyDb)}</b></div>
+      <div><span>Weakest downstream point</span><b>${recommendation.weakestDownstream ? `${escapeHtml(recommendation.weakestDownstream.label)} ${ebcSigned(recommendation.weakestDownstream.marginDb)}` : "—"}</b></div>
+      <div><span>End-of-leg margin</span><b>${ebcSigned(recommendation.remainingEndOfLegMarginDb)}</b></div>
+    </div>
+    ${changed ? `<button class="btn ebc-primary small" type="button" data-ebc-action="acceptRatio" data-node="${escapeHtml(recommendation.nodeId)}" data-ratio="${escapeHtml(recommendation.recommendedPcot)}">ACCEPT ${escapeHtml(recommendation.recommendedPcot)} AS MY INPUT</button>
+    <div class="ebc-inline-note">Accepting records ${escapeHtml(recommendation.recommendedPcot)} in your own EBC draft only. The designed ratio, the installed ratio on record and every field reading stay exactly as they are.</div>` : ""}
+  </div>`;
+}
+
+function renderEbcWhatIfPanel(){
+  const comparison = state.ebc.whatIf;
+  if (!comparison) return "";
+  return `<section class="card ebc-card ebc-whatif">
+    <div class="ebc-whatif-head">
+      <div>
+        <div class="map-field-card-kicker">WHAT IF I CHANGE THIS PCOT?</div>
+        <h2>${escapeHtml(comparison.label || comparison.nodeId)} — currently ${escapeHtml(comparison.current?.ratio || "not recorded")}</h2>
+        ${comparison.baseline?.dataQuality?.preliminary ? `<div class="ebc-prelim-chip">PRELIMINARY — ${escapeHtml(comparison.baseline.dataQuality.headline.replace("PRELIMINARY — ", ""))}</div>` : ""}
+      </div>
+      <button class="btn ghost small" type="button" data-ebc-action="closeWhatIf">CLOSE</button>
+    </div>
+    <div class="ebc-table-scroll">
+      <table class="ebc-compare ebc-whatif-table">
+        <thead><tr>
+          <th>Ratio</th><th>Predicted tap</th><th>Tap change</th><th>Predicted through</th>
+          <th>Downstream penalty</th><th>Weakest downstream</th><th>End-of-leg margin</th><th>Within limits</th><th></th>
+        </tr></thead>
+        <tbody>
+          ${comparison.candidates.map((candidate) => `<tr class="${candidate.feasible ? "is-feasible" : "is-rejected"}">
+            <td><b>${escapeHtml(candidate.ratio)}</b>${candidate.ratio === comparison.current?.ratio ? ' <span class="ebc-tag">current</span>' : ""}</td>
+            <td>${candidate.usable === false ? "—" : ebcDbm(candidate.predictedTapDeliveredDbm ?? candidate.predictedTapDbm)}</td>
+            <td>${ebcSigned(candidate.tapImprovementDb)}</td>
+            <td>${ebcDbm(candidate.predictedThroughDbm)}</td>
+            <td>${ebcSigned(candidate.downstreamPenaltyDb)}</td>
+            <td>${candidate.weakestDownstream ? `${escapeHtml(candidate.weakestDownstream.label)} ${ebcSigned(candidate.weakestDownstream.marginDb)}` : "—"}</td>
+            <td>${ebcSigned(candidate.endOfLegMarginDb)}</td>
+            <td>${candidate.usable === false ? `<span class="ebc-tag is-blocked">no spec</span>` : (candidate.allDownstreamWithinLimits ? `<span class="ebc-tag is-ok">yes</span>` : `<span class="ebc-tag is-bad">no</span>`)}</td>
+            <td>${candidate.feasible ? `<button class="btn ghost small" type="button" data-ebc-action="acceptRatio" data-node="${escapeHtml(comparison.nodeId)}" data-ratio="${escapeHtml(candidate.ratio)}">ACCEPT</button>` : ""}</td>
+          </tr>${candidate.blockedReason || (candidate.downstreamIssues || []).length ? `<tr class="ebc-whatif-why"><td colspan="9">${escapeHtml(candidate.blockedReason || candidate.downstreamIssues.map((issue) => issue.detail).join(" "))}</td></tr>` : ""}`).join("")}
+        </tbody>
+      </table>
+    </div>
+    <div class="ebc-inline-note">${escapeHtml(comparison.note || "")}</div>
+  </section>`;
+}
+
+function renderEbcSpecTable(){
+  return `<details class="card ebc-card ebc-specs">
+    <summary>PCOT specification table (${listPcotSpecs().length} ratios · ${ebcUsableRatios().length} usable)</summary>
+    <div class="ebc-table-scroll">
+      <table class="ebc-compare">
+        <thead><tr><th>Ratio</th><th>Through %</th><th>Tap %</th><th>Nominal through</th><th>Nominal tap</th><th>Max through</th><th>Max tap</th><th>Manufacturer</th><th>Model</th><th>λ</th><th>Status</th></tr></thead>
+        <tbody>
+          ${listPcotSpecs().map((spec) => `<tr class="is-${escapeHtml(String(spec.status).toLowerCase())}">
+            <td><b>${escapeHtml(spec.ratio)}</b></td>
+            <td>${spec.throughPercent ?? "—"}</td>
+            <td>${spec.tapPercent ?? "—"}</td>
+            <td>${spec.nominalThroughLossDb === null ? "—" : `${spec.nominalThroughLossDb} dB`}</td>
+            <td>${spec.nominalTapLossDb === null ? "—" : `${spec.nominalTapLossDb} dB`}</td>
+            <td>${spec.maxThroughInsertionLossDb === null ? "—" : `${spec.maxThroughInsertionLossDb} dB`}</td>
+            <td>${spec.maxTapInsertionLossDb === null ? "—" : `${spec.maxTapInsertionLossDb} dB`}</td>
+            <td>${escapeHtml(spec.manufacturer || "—")}</td>
+            <td>${escapeHtml(spec.model || "—")}</td>
+            <td>${spec.wavelengthNm ?? "—"}</td>
+            <td><span class="ebc-tag ${spec.verified ? "is-ok" : "is-bad"}">${escapeHtml(spec.status)}</span></td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+    <div class="ebc-inline-note">Configure these through configurePcotSpec() in services/ebc/pcotSpecs.mjs. A ratio is only marked VERIFIED when it carries nominal and maximum insertion loss for both paths, a manufacturer, a model and a wavelength.</div>
+  </details>`;
+}
+
+/* -------------------------------------------------------------------------
+   Events
+   ------------------------------------------------------------------------- */
+
+function ebcSetDraftValue(legId, nodeId, path, rawValue){
+  const draft = getEbcDraft(legId);
+  const target = nodeId
+    ? (draft.nodes[nodeId] = draft.nodes[nodeId] || {})
+    : draft;
+  const parts = String(path).split(".");
+  // Text-valued fields are listed explicitly: anything not named here is parsed
+  // as a number, so a stray string can never enter the optical math.
+  const TEXT_FIELDS = new Set(["notes", "direction", "distanceUnit", "installedRatio", "portId"]);
+  const leaf = parts[parts.length - 1];
+  const value = TEXT_FIELDS.has(leaf)
+    ? (String(rawValue || "").trim() || null)
+    : ebcNum(rawValue);
+
+  let cursor = target;
+  for (let index = 0; index < parts.length - 1; index += 1){
+    const key = parts[index];
+    cursor[key] = cursor[key] || {};
+    cursor = cursor[key];
+  }
+  cursor[parts[parts.length - 1]] = value;
+  saveEbcDrafts();
+}
+
+function bindEbcEvents(){
+  if (_ebcEventsBound) return;
+  const root = $("ebcRoot");
+  if (!root) return;
+  _ebcEventsBound = true;
+
+  root.addEventListener("change", (event) => {
+    const field = event.target.closest("[data-ebc-input]");
+    if (field){
+      ebcSetDraftValue(ebcActiveLegId(), field.dataset.ebcNode || "", field.dataset.ebcInput, field.value);
+      // Any input change re-derives the entire cascade, never one device.
+      state.ebc.recommendation = null;
+      state.ebc.whatIf = null;
+      renderEbcScreen();
+      return;
+    }
+    const legSelect = event.target.closest('[data-ebc-action="selectLeg"]');
+    if (legSelect){
+      state.ebc.legId = legSelect.value;
+      state.ebc.recommendation = null;
+      state.ebc.whatIf = null;
+      renderEbcScreen();
+    }
+  });
+
+  root.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-ebc-action]");
+    if (!button || button.tagName === "SELECT") return;
+    const action = button.dataset.ebcAction;
+    const nodeId = button.dataset.node || "";
+    const legId = ebcActiveLegId();
+
+    if (action === "mode"){
+      state.ebc.mode = button.dataset.mode === "field" ? "field" : "design";
+      renderEbcScreen();
+      return;
+    }
+    if (action === "toggleTrace"){
+      state.ebc.openTrace[nodeId] = !state.ebc.openTrace[nodeId];
+      state.ebc.focusNodeId = nodeId;
+      renderEbcScreen();
+      return;
+    }
+    if (action === "closeWhatIf"){
+      state.ebc.whatIf = null;
+      renderEbcScreen();
+      return;
+    }
+    if (action === "calculate"){
+      setButtonBusy(button, true);
+      ebcRecalculate();
+      const result = state.ebc.result;
+      renderEbcScreen();
+      toast("EBC", result?.ok
+        ? `Cascade recalculated — leg is ${result.status}.`
+        : `${result?.validation?.blocking?.length || 0} required input(s) still missing.`,
+        result?.ok ? "success" : "error");
+      return;
+    }
+    if (action === "resetDraft"){
+      delete state.ebc.drafts[legId];
+      saveEbcDrafts();
+      state.ebc.recommendation = null;
+      state.ebc.whatIf = null;
+      renderEbcScreen();
+      toast("EBC", "Your EBC inputs for this leg were cleared. Project data is unchanged.");
+      return;
+    }
+    if (action === "whatIf"){
+      setButtonBusy(button, true);
+      const leg = buildEbcLeg(legId);
+      // Every ratio is listed, including the ones with no specification, so the
+      // technician can see that a ratio exists and is waiting on engineering
+      // data rather than wondering why it is absent.
+      state.ebc.whatIf = ebcWhatIf(leg, nodeId, PCOT_RATIOS, { mode: state.ebc.mode });
+      state.ebc.focusNodeId = nodeId;
+      renderEbcScreen();
+      return;
+    }
+    if (action === "recommend" || action === "recommendLeg"){
+      setButtonBusy(button, true);
+      const leg = buildEbcLeg(legId);
+      const targetId = nodeId || ebcWeakestNodeId(leg);
+      state.ebc.recommendation = targetId ? ebcRecommend(leg, targetId, { mode: state.ebc.mode }) : null;
+      state.ebc.focusNodeId = targetId;
+      renderEbcScreen();
+      const recommendation = state.ebc.recommendation;
+      if (recommendation && recommendation.outcome === EBC_RECOMMENDATION_OUTCOME.NO_SAFE_PCOT_CHANGE){
+        toast("EBC", "NO SAFE PCOT CHANGE for this location.", "error");
+      }
+      return;
+    }
+    if (action === "acceptRatio"){
+      // Explicit acceptance, and only into the technician's own draft.
+      ebcSetDraftValue(legId, nodeId, "installedRatio", button.dataset.ratio || "");
+      state.ebc.whatIf = null;
+      state.ebc.recommendation = null;
+      state.ebc.focusNodeId = nodeId;
+      renderEbcScreen();
+      toast("EBC", `${button.dataset.ratio} recorded in your EBC draft. Project records are unchanged.`);
+    }
+  });
+}
+
+/** Default target for the leg-level Recommend button: the weakest location. */
+function ebcWeakestNodeId(leg){
+  const result = ebcCalculateLeg(leg, { mode: state.ebc.mode });
+  if (result.weakest) return result.weakest.nodeId;
+  return leg.nodes.length ? leg.nodes[0].id : "";
+}
+
+/**
+ * "Open in EBC" from a mapped PCOT / location card.
+ * Preloads the leg that owns the identifier and scrolls to that PCOT. It reads
+ * project data and never writes to it.
+ */
+window.openLocationInEbc = function openLocationInEbc(identifier){
+  const match = findNode54LegForPcot(identifier);
+  if (!match){
+    toast("EBC", `No documented cascade contains ${identifier}.`, "error");
+    return;
+  }
+  loadEbcDrafts();
+  state.ebc.legId = match.leg.legId;
+  state.ebc.focusNodeId = match.node.id;
+  state.ebc.whatIf = null;
+  state.ebc.recommendation = null;
+  setActiveView("viewEbc");
+  renderEbcScreen();
+};
+
+SpecCom.ebc = {
+  render: renderEbcScreen,
+  recalculate: ebcRecalculate,
+  buildLeg: buildEbcLeg,
+  openLocation: (identifier) => window.openLocationInEbc(identifier),
+};

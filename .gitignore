@@ -8,6 +8,8 @@ supabase/.temp/**
 node_modules/
 .tmp_*/
 .tmp*
+tmp/
+deno.lock
 *.err
 *.out
 .tmp_public_schema.sql
