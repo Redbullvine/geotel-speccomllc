@@ -32,6 +32,7 @@ test("every workspace section is a flat sibling, and exactly one starts active",
   for (const expected of [
     "viewDashboard", "viewMap", "viewTechnician", "viewInvoices", "viewCatalog",
     "viewDispatch", "viewSupervisor", "viewAdmin", "viewRootCommandCenter", "viewOnboarding",
+    "viewEbc",
   ]){
     assert.ok(ids.includes(expected), `${expected} should be a top-level workspace section`);
   }
@@ -114,4 +115,23 @@ test("the Workspace Gateway stays reachable from the menu", () => {
   // the pre-existing entries must survive this stage
   assert.match(menu, /data-view="viewMap"/);
   assert.match(menu, /data-view="viewRootCommandCenter"/);
+});
+
+test("the Fiber Engineer owns the #ebc route and only that section", () => {
+  // route registration, both directions
+  assert.match(appSource, /routeToken === "ebc"[\s\S]{0,80}return "viewEbc";/);
+  assert.match(appSource, /viewId === "viewEbc"\)\{\s*nextHash = "#ebc";/);
+
+  const sections = sliceWorkspaceSections();
+  const ebc = sections.find((section) => section.id === "viewEbc");
+  assert.ok(ebc, "viewEbc should be a top-level workspace section");
+  assert.ok(ebc.markup.includes("ebcRoot"), "the Fiber Engineer renders into its own root");
+  assert.ok(!ebc.extraClasses.split(/\s+/).includes("active"), "it must not be pre-activated");
+
+  // the Fiber Engineer markup lives nowhere else
+  for (const other of sections){
+    if (other.id === "viewEbc") continue;
+    assert.ok(!other.markup.includes("ebcRoot"), `ebcRoot leaked into ${other.id}`);
+  }
+  assert.equal((indexSource.match(/id="ebcRoot"/g) || []).length, 1);
 });

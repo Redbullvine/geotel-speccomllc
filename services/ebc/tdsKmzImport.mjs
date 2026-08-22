@@ -116,7 +116,13 @@ export function parseTdsKml(kmlText){
   const chunks = text.split("<Placemark").slice(1);
   const placemarks = [];
 
-  for (const chunk of chunks){
+  for (const rawChunk of chunks){
+    // Some TDS exports put the description table in the CDATA as literal HTML;
+    // others escape it (&lt;tr&gt;...). Unescape only when the chunk carries no
+    // real rows, so exports that already hold raw HTML parse exactly as before.
+    const chunk = /<tr[^>]*>/.test(rawChunk) || !/&lt;tr/i.test(rawChunk)
+      ? rawChunk
+      : rawChunk.replace(/&lt;/g, "<").replace(/&gt;/g, ">");
     const fields = {};
     for (const row of chunk.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)){
       const cells = [...row[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)]

@@ -25,6 +25,16 @@ import {
   isProjectContextCurrent,
 } from "./services/fieldVisitEvidence.mjs";
 import {
+  buildManualPole,
+  buildSplicePoles,
+  resolveDirection,
+} from "./services/fiberDiagram/poleModel.mjs";
+import {
+  CableStringError,
+  parseCableString,
+  renderSpliceDiagram,
+} from "./services/fiberDiagram/index.mjs";
+import {
   lastWorkspaceStorageKey,
   normalizeWorkspaceHash,
   resolveLandingRoute,
@@ -67,12 +77,14 @@ import {
   DEFAULT_PCOT_SPECS,
   EBC_RECOMMENDATION_OUTCOME,
   EBC_STATUS,
+  extractTdsDesign,
   findNode54LegForPcot,
   findNodeResult as ebcFindNode,
   formatTrace as ebcFormatTrace,
   listPcotSpecs,
   PCOT_RATIOS,
   recommendPcot as ebcRecommend,
+  specsAreEngineeringApproved,
   unspecifiedRatios as ebcUnspecifiedRatios,
   usableRatios as ebcUsableRatios,
   whatIf as ebcWhatIf,
@@ -513,6 +525,16 @@ const state = {
   // separate from designed ratios, installed ratios and recorded field
   // evidence, and are never written back over any of them.
   ebc: {
+    tab: "budget",
+    design: null,
+    designName: "",
+    poles: [],
+    poleId: "",
+    poleInCableId: "",
+    importWarnings: [],
+    importError: "",
+    importing: false,
+    manual: { name: "", enclosure: "", inString: "", outString: "" },
     legId: "",
     mode: "design",
     drafts: {},
@@ -12367,6 +12389,7 @@ function parseViewFromHash(hashValue = window.location.hash){
   if (routeToken === "dispatch" || routeToken === "viewdispatch") return "viewDispatch";
   if (routeToken === "supervisor" || routeToken === "viewsupervisor") return "viewSupervisor";
   if (routeToken === "admin" || routeToken === "viewadmin") return "viewAdmin";
+  if (routeToken === "ebc" || routeToken === "fiber" || routeToken === "viewebc") return "viewEbc";
   if (["root", "command-center", "root-command-center", "viewrootcommandcenter"].includes(routeToken)) return "viewRootCommandCenter";
   return null;
 }
@@ -12399,6 +12422,8 @@ function syncHashForView(viewId){
     nextHash = "#supervisor";
   } else if (viewId === "viewAdmin"){
     nextHash = _activeAdminTab === "onboarding" ? "#admin/onboarding" : "#admin";
+  } else if (viewId === "viewEbc"){
+    nextHash = "#ebc";
   } else if (viewId === "viewRootCommandCenter"){
     nextHash = "#root-command-center";
   } else {
@@ -31203,6 +31228,11 @@ function renderLocations(){
       ? ""
       : (r.completed ? '<span class="pill-ok">COMPLETE</span>' : '<span class="pill-warn">INCOMPLETE</span>');
     const demoAttrs = isDemoUser() ? `disabled title="${t("availableInProduction")}"` : "";
+    // Read-only jump into the Fiber Engineer splice view for this pole.
+    // Adds no write path: it only selects a pole on a diagram screen.
+    const fiberBtn = isViewAllowed("viewEbc")
+      ? `<button class="btn ghost small" data-action="openFiberEngineer" data-pole="${escapeHtml(String(r.name || r.id || ""))}">Open in Fiber Engineer</button>`
+      : "";
     const editNameBtn = r.isEditingName
       ? ""
       : `<button class="btn ghost small" data-action="editName" data-id="${r.id}" ${billingLocked || disableActions ? "disabled" : ""}>Edit name</button>`;
@@ -31230,7 +31260,8 @@ function renderLocations(){
         </div>
         <div>
           ${done ? `<div style="display:flex; justify-content:flex-end;">${done}</div>` : ""}
-          <div class="row" style="justify-content:flex-end; margin-top:6px;">
+          <div class="row" style="justify-content:flex-end; margin-top:6px; flex-wrap:wrap; gap:6px;">
+            ${fiberBtn}
             ${editNameBtn}
           </div>
         </div>
@@ -31345,6 +31376,11 @@ function renderLocations(){
     if (!btn) return;
     const action = btn.dataset.action;
     const id = btn.dataset.id;
+    if (action === "openFiberEngineer"){
+      e.stopPropagation();
+      window.openPoleInFiberEngineer(btn.dataset.pole || "");
+      return;
+    }
     if (action === "editName"){
       const loc = node.splice_locations.find(x => x.id === id);
       if (!loc) return;
@@ -42568,15 +42604,59 @@ function ebcRecalculate(){
    Rendering
    ------------------------------------------------------------------------- */
 
+const EBC_TABS = Object.freeze([
+  { key: "import", label: "Import" },
+  { key: "splice", label: "Splice" },
+  { key: "budget", label: "Budget" },
+]);
+
+function ebcActiveTab(){
+  const tab = String(state.ebc.tab || "budget");
+  return EBC_TABS.some((entry) => entry.key === tab) ? tab : "budget";
+}
+
+function renderFiberEngineerTabs(){
+  const active = ebcActiveTab();
+  return `<nav class="ebc-tabs" role="tablist" aria-label="Fiber Engineer sections">
+    ${EBC_TABS.map((tab) => `<button class="ebc-tab${tab.key === active ? " is-active" : ""}" type="button" role="tab" aria-selected="${tab.key === active}" data-ebc-tab="${tab.key}">${escapeHtml(tab.label)}</button>`).join("")}
+  </nav>`;
+}
+
+/** The Fiber Engineer screen: one shell, three tabs. */
 function renderEbcScreen(){
+  const root = $("ebcRoot");
+  if (!root) return;
+  const active = ebcActiveTab();
+  if (active === "import"){
+    root.innerHTML = `<div class="ebc-shell">${renderFiberEngineerHeader()}${renderFiberEngineerTabs()}${renderEbcImportTab()}</div>`;
+    bindFiberEngineerEvents();
+    return;
+  }
+  if (active === "splice"){
+    root.innerHTML = `<div class="ebc-shell">${renderFiberEngineerHeader()}${renderFiberEngineerTabs()}${renderEbcSpliceTab()}</div>`;
+    bindFiberEngineerEvents();
+    return;
+  }
+  renderEbcBudgetTab();
+  bindFiberEngineerEvents();
+}
+
+function renderFiberEngineerHeader(){
+  return `<header class="card ebc-card ebc-fe-header">
+    <h1 id="ebcTitle">Fiber Engineer</h1>
+    <div class="muted small">Splice diagrams and optical budget from the documented design. Nothing here writes to field records.</div>
+  </header>`;
+}
+
+function renderEbcBudgetTab(){
   const root = $("ebcRoot");
   if (!root) return;
   if (!state.ebc.drafts || !Object.keys(state.ebc.drafts).length) loadEbcDrafts();
 
   const legs = getEbcSourceLegs();
   if (!legs.length){
-    root.innerHTML = `<div class="card ebc-card"><h1 id="ebcTitle">EBC — Engineer Budget Calculator</h1>
-      <div class="ebc-empty">No leg topology is available. The EBC only builds a cascade from documented project data, and none is present for the current project.</div></div>`;
+    root.innerHTML = `<div class="ebc-shell">${renderFiberEngineerHeader()}${renderFiberEngineerTabs()}
+      <div class="card ebc-card"><div class="ebc-empty">No leg topology is available. The optical budget only builds a cascade from documented project data, and none is present for the current project. Import a design on the Import tab, or open the Splice tab to draw connectivity without optical data.</div></div></div>`;
     bindEbcEvents();
     return;
   }
@@ -42587,6 +42667,8 @@ function renderEbcScreen(){
 
   root.innerHTML = `
     <div class="ebc-shell">
+      ${renderFiberEngineerHeader()}
+      ${renderFiberEngineerTabs()}
       ${renderEbcHeader(leg, legs, result)}
       ${renderEbcPreliminaryBanner(result)}
       ${renderEbcSpecBanner(result)}
@@ -43179,4 +43261,347 @@ SpecCom.ebc = {
   recalculate: ebcRecalculate,
   buildLeg: buildEbcLeg,
   openLocation: (identifier) => window.openLocationInEbc(identifier),
+};
+
+/* ==========================================================================
+   Fiber Engineer — Import and Splice tabs
+   The optical budget lives in renderEbcBudgetTab(); these two tabs work from
+   topology alone and never require optical data. Nothing here writes to field
+   evidence, photos or historical records.
+   ========================================================================== */
+
+/** Pull the raw doc.kml text out of a .kmz, reusing the JSZip loader. */
+async function readKmzKmlText(file){
+  const name = String(file?.name || "").toLowerCase();
+  if (name.endsWith(".kml")) return await file.text();
+  const JSZip = await loadJsZip();
+  const zip = await JSZip.loadAsync(file);
+  const entries = Object.values(zip.files || {}).filter((entry) => !entry.dir);
+  const kmls = entries.filter((entry) => String(entry.name || "").toLowerCase().endsWith(".kml"));
+  if (!kmls.length) throw new Error("KMZ does not contain a .kml file.");
+  const preferred = kmls.find((entry) => String(entry.name || "").toLowerCase().endsWith("doc.kml")) || kmls[0];
+  return await preferred.async("string");
+}
+
+async function handleFiberEngineerImport(file){
+  if (!file) return;
+  state.ebc.importing = true;
+  state.ebc.importError = "";
+  renderEbcScreen();
+  try {
+    const kmlText = await readKmzKmlText(file);
+    const design = extractTdsDesign(kmlText);
+    const { poles, warnings } = buildSplicePoles(design);
+    state.ebc.design = design;
+    state.ebc.designName = String(file.name || "design");
+    state.ebc.poles = poles;
+    state.ebc.importWarnings = warnings;
+    state.ebc.poleId = poles.find((pole) => pole.cables.length >= 2)?.id || poles[0]?.id || "";
+    state.ebc.poleInCableId = "";
+    toast("Fiber Engineer", `${poles.length} poles read from ${file.name || "the design"}.`);
+  } catch (error){
+    state.ebc.importError = error?.message || String(error);
+    state.ebc.design = null;
+    state.ebc.poles = [];
+    toast("Import failed", state.ebc.importError, "error");
+  } finally {
+    state.ebc.importing = false;
+    renderEbcScreen();
+  }
+}
+
+function renderEbcImportTab(){
+  const design = state.ebc.design;
+  const poles = Array.isArray(state.ebc.poles) ? state.ebc.poles : [];
+  const parseErrors = poles.reduce((sum, pole) => sum + (pole.parseErrors || 0), 0);
+
+  const summary = !design ? "" : `
+    <div class="ebc-import-grid">
+      ${[
+        ["Placemarks", design.placemarkCount],
+        ["Cables", design.cables.length],
+        ["Splitter positions", design.devices.length],
+        ["Network points", design.networkPoints.length],
+        ["Poles with connectivity", poles.length],
+        ["Cable strings rejected", parseErrors],
+      ].map(([label, value]) => `<div class="ebc-import-stat"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(String(value))}</div></div>`).join("")}
+    </div>
+    <div class="note ${design.containsInsertionLoss ? "" : "warn"}">
+      ${design.containsInsertionLoss
+        ? "This export carries declared tap loss values."
+        : "This export carries no optical loss for any device. Splice diagrams render from topology; the optical budget stays unavailable until specifications are configured."}
+    </div>`;
+
+  const errorRows = poles.filter((pole) => pole.parseErrors > 0);
+  const errorList = !errorRows.length ? "" : `
+    <div class="card ebc-card">
+      <h2>Rejected cable strings</h2>
+      <div class="muted small">Listed exactly as the parser rejected them. Nothing is guessed around.</div>
+      <ul class="ebc-error-list">
+        ${errorRows.map((pole) => pole.cables.filter((cable) => cable.parseError).map((cable) => `<li><strong>${escapeHtml(pole.name)}</strong> — ${escapeHtml(cable.id)}<div class="muted small">${escapeHtml(cable.parseError)}</div></li>`).join("")).join("")}
+      </ul>
+    </div>`;
+
+  const warningList = !state.ebc.importWarnings?.length ? "" : `
+    <div class="card ebc-card">
+      <h2>Import warnings</h2>
+      <ul class="ebc-error-list">${state.ebc.importWarnings.slice(0, 40).map((w) => `<li>${escapeHtml(w)}</li>`).join("")}</ul>
+    </div>`;
+
+  const poleTable = !poles.length ? "" : `
+    <div class="card ebc-card">
+      <h2>Poles</h2>
+      <div class="ebc-table-scroll">
+        <table class="table ebc-pole-table">
+          <thead><tr><th>Pole</th><th>Cables</th><th>Splitters</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            ${poles.map((pole) => `<tr>
+              <td>${escapeHtml(pole.name)}</td>
+              <td>${pole.cables.length}</td>
+              <td>${pole.splitters.length}</td>
+              <td>${pole.parseErrors ? `<span class="chip"><span class="dot bad"></span>${pole.parseErrors} rejected</span>` : `<span class="chip"><span class="dot ok"></span>parsed</span>`}</td>
+              <td><button class="btn ghost small" type="button" data-ebc-open-pole="${escapeHtml(pole.id)}">Splice</button></td>
+            </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+
+  return `
+    <div class="card ebc-card">
+      <h2>Import a TDS design</h2>
+      <div class="muted small">Reads the same KMZ/KML export the map uses. Topology only — no field record is touched.</div>
+      <div class="row ebc-import-row">
+        <input id="ebcImportInput" class="input" type="file" accept=".kmz,.kml" />
+        <button id="btnEbcImport" class="btn" type="button" ${state.ebc.importing ? "disabled" : ""}>${state.ebc.importing ? "Reading…" : "Import design"}</button>
+        ${state.ebc.designName ? `<span class="chip"><span class="dot ok"></span>${escapeHtml(state.ebc.designName)}</span>` : ""}
+      </div>
+      ${state.ebc.importError ? `<div class="note warn" style="margin-top:12px;">${escapeHtml(state.ebc.importError)}</div>` : ""}
+      ${summary}
+    </div>
+    ${poleTable}
+    ${errorList}
+    ${warningList}`;
+}
+
+function ebcSelectedPole(){
+  const poles = Array.isArray(state.ebc.poles) ? state.ebc.poles : [];
+  return poles.find((pole) => pole.id === state.ebc.poleId) || poles[0] || null;
+}
+
+/**
+ * Optical annotation for the splice diagram, gated on verified specs.
+ * Returns null when the cascade has not been calculated, so the diagram
+ * renders clean rather than showing power derived from unverified data.
+ */
+function ebcSpliceAnnotations(){
+  const result = state.ebc.result;
+  if (!result || !Array.isArray(result.nodes) || !result.nodes.length) return null;
+  const verified = specsAreEngineeringApproved(state.ebc.specs || undefined);
+  const splitters = {};
+  for (const node of result.nodes){
+    if (node.inputDbm === null && node.throughOutputDbm === null) continue;
+    splitters[node.id] = {
+      inputDbm: node.inputDbm,
+      throughDbm: node.throughOutputDbm,
+      tapDbm: node.tapOutputDbm,
+      status: node.status || null,
+    };
+  }
+  if (!Object.keys(splitters).length) return null;
+  return { verified, splitters };
+}
+
+function renderEbcSpliceTab(){
+  const poles = Array.isArray(state.ebc.poles) ? state.ebc.poles : [];
+  if (!poles.length){
+    return `<div class="card ebc-card">
+      <h2>Splice diagram</h2>
+      <div class="ebc-empty">No topology loaded. Import a TDS design on the Import tab, or enter connectivity strings below.</div>
+    </div>${renderEbcManualEntry()}`;
+  }
+
+  const pole = ebcSelectedPole();
+  const inCableId = state.ebc.poleInCableId || pole?.cables?.[0]?.id || "";
+  let diagram = "";
+  let diagramError = "";
+  if (pole && pole.cables.length){
+    try {
+      const resolved = resolveDirection(pole, inCableId);
+      diagram = renderSpliceDiagram(resolved, { annotations: ebcSpliceAnnotations() });
+    } catch (error){
+      diagramError = error?.message || String(error);
+    }
+  }
+
+  return `
+    <div class="card ebc-card">
+      <h2>Splice diagram</h2>
+      <div class="row ebc-splice-controls">
+        <label class="small">Pole
+          <select id="ebcPoleSelect" class="input">
+            ${poles.map((p) => `<option value="${escapeHtml(p.id)}"${p.id === pole?.id ? " selected" : ""}>${escapeHtml(p.name)} (${p.cables.length} cables)</option>`).join("")}
+          </select>
+        </label>
+        <label class="small">Feed cable (IN)
+          <select id="ebcInCableSelect" class="input">
+            ${(pole?.cables || []).map((cable) => `<option value="${escapeHtml(cable.id)}"${cable.id === inCableId ? " selected" : ""}>${escapeHtml(cable.id)}${cable.fiberCount ? ` · ${cable.fiberCount}ct` : ""}</option>`).join("")}
+          </select>
+        </label>
+        <button id="btnEbcDownloadSvg" class="btn secondary small" type="button" ${diagram ? "" : "disabled"}>Download SVG</button>
+        <button id="btnEbcPrintSvg" class="btn ghost small" type="button" ${diagram ? "" : "disabled"}>Print</button>
+      </div>
+      ${pole && !pole.directionResolved ? `<div class="note">Direction is not recorded in the export. The feed cable above is your choice, not a design fact.</div>` : ""}
+      ${diagramError ? `<div class="note warn">${escapeHtml(diagramError)}</div>` : ""}
+      <div id="ebcDiagramHost" class="ebc-diagram-host">${diagram}</div>
+    </div>
+    ${renderEbcManualEntry()}`;
+}
+
+function renderEbcManualEntry(){
+  const manual = state.ebc.manual || {};
+  return `<details class="card ebc-card ebc-manual">
+    <summary>Enter connectivity strings by hand</summary>
+    <div class="muted small">For designs whose export carries no Cable Count field. Stored as a manual entry, never as design data.</div>
+    <div class="field-stack">
+      <input id="ebcManualName" class="input" placeholder="Pole name (e.g. POLE 1748)" value="${escapeHtml(manual.name || "")}" />
+      <input id="ebcManualEnclosure" class="input" placeholder="Enclosure (optional)" value="${escapeHtml(manual.enclosure || "")}" />
+      <input id="ebcManualIn" class="input" placeholder="IN string  XD:1-27;1635CA:P0004;XD:29-48" value="${escapeHtml(manual.inString || "")}" />
+      <input id="ebcManualOut" class="input" placeholder="OUT string (optional)" value="${escapeHtml(manual.outString || "")}" />
+      <button id="btnEbcManualRender" class="btn small" type="button">Render from strings</button>
+    </div>
+  </details>`;
+}
+
+function ebcDownloadDiagram(mode){
+  const host = $("ebcDiagramHost");
+  const svg = host?.innerHTML || "";
+  if (!svg.trim()) return;
+  const pole = ebcSelectedPole();
+  const title = pole?.name || "splice-diagram";
+  if (mode === "print"){
+    const frame = document.createElement("iframe");
+    frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    doc.open();
+    doc.write(`<!doctype html><title>${escapeHtml(title)}</title><body style="margin:0">${svg}</body>`);
+    doc.close();
+    frame.contentWindow.focus();
+    frame.contentWindow.print();
+    setTimeout(() => frame.remove(), 1000);
+    return;
+  }
+  const blob = new Blob([svg], { type: "image/svg+xml" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${String(title).replace(/[^\w.-]+/g, "_")}.svg`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function handleEbcManualRender(){
+  const manual = {
+    name: $("ebcManualName")?.value?.trim() || "",
+    enclosure: $("ebcManualEnclosure")?.value?.trim() || "",
+    inString: $("ebcManualIn")?.value?.trim() || "",
+    outString: $("ebcManualOut")?.value?.trim() || "",
+  };
+  state.ebc.manual = manual;
+  if (!manual.inString){
+    toast("Fiber Engineer", "An IN cable connectivity string is required.", "error");
+    return;
+  }
+  try {
+    const pole = buildManualPole({
+      name: manual.name || "POLE",
+      enclosure: manual.enclosure,
+      inCable: { id: "manual-in", string: manual.inString },
+      outCables: manual.outString ? [{ id: "manual-out", string: manual.outString, primary: true }] : [],
+    });
+    const entry = {
+      ...pole,
+      cables: [pole.cableIn, ...pole.cablesOut],
+      splitters: pole.splitters || [],
+      parseErrors: 0,
+    };
+    state.ebc.poles = [entry, ...(state.ebc.poles || []).filter((p) => p.id !== entry.id)];
+    state.ebc.poleId = entry.id;
+    state.ebc.poleInCableId = pole.cableIn.id;
+    renderEbcScreen();
+  } catch (error){
+    const message = error instanceof CableStringError
+      ? error.message
+      : (error?.message || String(error));
+    toast("Cable string rejected", message, "error");
+  }
+}
+
+let _fiberEngineerBound = false;
+function bindFiberEngineerEvents(){
+  const root = $("ebcRoot");
+  if (!root || _fiberEngineerBound) return;
+  _fiberEngineerBound = true;
+  root.addEventListener("click", (event) => {
+    const tabBtn = event.target.closest("[data-ebc-tab]");
+    if (tabBtn){
+      state.ebc.tab = tabBtn.dataset.ebcTab;
+      renderEbcScreen();
+      return;
+    }
+    const openPole = event.target.closest("[data-ebc-open-pole]");
+    if (openPole){
+      state.ebc.poleId = openPole.dataset.ebcOpenPole;
+      state.ebc.poleInCableId = "";
+      state.ebc.tab = "splice";
+      renderEbcScreen();
+      return;
+    }
+    if (event.target.closest("#btnEbcImport")){
+      const input = $("ebcImportInput");
+      const file = input?.files?.[0];
+      if (!file){
+        toast("Fiber Engineer", "Choose a .kmz or .kml file first.");
+        return;
+      }
+      void handleFiberEngineerImport(file);
+      return;
+    }
+    if (event.target.closest("#btnEbcDownloadSvg")) return ebcDownloadDiagram("download");
+    if (event.target.closest("#btnEbcPrintSvg")) return ebcDownloadDiagram("print");
+    if (event.target.closest("#btnEbcManualRender")) return handleEbcManualRender();
+  });
+  root.addEventListener("change", (event) => {
+    if (event.target.id === "ebcPoleSelect"){
+      state.ebc.poleId = event.target.value;
+      state.ebc.poleInCableId = "";
+      renderEbcScreen();
+      return;
+    }
+    if (event.target.id === "ebcInCableSelect"){
+      state.ebc.poleInCableId = event.target.value;
+      renderEbcScreen();
+    }
+  });
+}
+
+/** Map location cards call this to open a pole straight in the Splice tab. */
+window.openPoleInFiberEngineer = function openPoleInFiberEngineer(poleId){
+  const wanted = String(poleId || "").trim();
+  if (!isViewAllowed("viewEbc")) return;
+  state.ebc.tab = "splice";
+  const match = (state.ebc.poles || []).find((pole) => String(pole.id) === wanted
+    || String(pole.name).toLowerCase() === wanted.toLowerCase());
+  if (match){
+    state.ebc.poleId = match.id;
+    state.ebc.poleInCableId = "";
+  } else if (wanted){
+    toast("Fiber Engineer", `Pole ${wanted} is not in the loaded design. Import the design that contains it.`);
+    state.ebc.tab = state.ebc.poles?.length ? "splice" : "import";
+  }
+  setActiveView("viewEbc");
+  renderEbcScreen();
 };
