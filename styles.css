@@ -10840,3 +10840,93 @@ table.ebc-compare tr.is-feasible td:first-child{ font-weight:800; }
   overflow-wrap:anywhere;
 }
 .ebc-table-scroll{ max-width:100%; min-width:0; }
+
+
+/* ==========================================================================
+   Fiber Engineer — tab shell, import summary and splice diagram
+   Built on the existing .card / .btn / .chip system so the screen reads as
+   part of the app rather than a separate tool. Desktop ROOT and iPhone widths.
+   ========================================================================== */
+
+.ebc-fe-header{ display:grid; gap:4px; }
+.ebc-fe-header h1{ margin:0; font-size:20px; }
+
+.ebc-tabs{
+  display:flex; gap:6px; padding:4px;
+  background:var(--panel-2, rgba(255,255,255,0.04));
+  border:1px solid var(--line, rgba(255,255,255,0.10));
+  border-radius:10px;
+  overflow-x:auto; -webkit-overflow-scrolling:touch;
+}
+.ebc-tab{
+  flex:1 1 auto; min-width:96px;
+  padding:9px 14px;
+  border:0; border-radius:7px;
+  background:transparent;
+  color:var(--muted, #9aa4b2);
+  font-size:13px; font-weight:600;
+  cursor:pointer;
+  transition:background .15s, color .15s, transform .06s;
+  white-space:nowrap;
+}
+.ebc-tab:hover{ color:var(--text, #e6edf3); background:rgba(255,255,255,0.05); }
+.ebc-tab:active{ transform:translateY(1px); }
+.ebc-tab.is-active{
+  background:var(--accent, #1d7a45);
+  color:#fff;
+}
+
+.ebc-import-row{ margin-top:12px; gap:10px; flex-wrap:wrap; align-items:center; }
+.ebc-import-row .input[type="file"]{ max-width:320px; }
+
+.ebc-import-grid{
+  display:grid; gap:10px; margin-top:14px;
+  grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));
+}
+.ebc-import-stat{
+  padding:10px 12px; border-radius:8px;
+  background:var(--panel-2, rgba(255,255,255,0.04));
+  border:1px solid var(--line, rgba(255,255,255,0.08));
+}
+.ebc-import-stat .label{ font-size:11px; color:var(--muted, #9aa4b2); text-transform:uppercase; letter-spacing:.04em; }
+.ebc-import-stat .value{ font-size:20px; font-weight:700; margin-top:2px; }
+
+.ebc-error-list{ margin:10px 0 0; padding-left:18px; display:grid; gap:8px; }
+.ebc-error-list li{ font-size:13px; }
+
+.ebc-table-scroll{ overflow-x:auto; -webkit-overflow-scrolling:touch; margin-top:10px; }
+.ebc-pole-table{ width:100%; min-width:520px; }
+
+.ebc-splice-controls{ margin-top:10px; gap:10px; flex-wrap:wrap; align-items:flex-end; }
+.ebc-splice-controls label{ display:grid; gap:4px; }
+.ebc-splice-controls .input{ min-width:180px; }
+
+/* The diagram is wide by nature: it scrolls inside its own frame so the page
+   never scrolls sideways. */
+.ebc-diagram-host{
+  margin-top:14px;
+  overflow-x:auto; -webkit-overflow-scrolling:touch;
+  background:#fff;
+  border:1px solid var(--line, rgba(255,255,255,0.10));
+  border-radius:10px;
+  padding:8px;
+}
+.ebc-diagram-host svg{ display:block; max-width:none; }
+.ebc-diagram-host:empty{ display:none; }
+
+.ebc-manual summary{ cursor:pointer; font-weight:600; font-size:14px; }
+.ebc-manual .field-stack{ margin-top:10px; }
+.ebc-manual .muted{ margin-top:8px; }
+
+@media (max-width: 720px){
+  .ebc-tab{ min-width:78px; padding:9px 8px; font-size:12px; }
+  .ebc-splice-controls .input{ min-width:0; width:100%; }
+  .ebc-splice-controls label{ width:100%; }
+  .ebc-import-row .input[type="file"]{ max-width:100%; }
+  .ebc-fe-header h1{ font-size:18px; }
+}
+
+@media print{
+  .ebc-tabs, .ebc-splice-controls, .ebc-manual, #main-navbar, .mobile-bottom-nav{ display:none !important; }
+  .ebc-diagram-host{ border:0; padding:0; overflow:visible; }
+}
