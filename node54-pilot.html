@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>SpecCom — Node 54</title>
+  <link rel="stylesheet" href="client/v2/node54Pilot.css">
+</head>
+<body>
+  <main id="gateway" class="gateway">
+    <img src="assets/speccom_logo_2.png" alt="SpecCom" class="logo">
+    <h1>Please Enter Project ID</h1>
+    <form id="gatewayForm">
+      <label for="projectCode">Project ID</label>
+      <input id="projectCode" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="SC-XXX-XXXX-XXXX-XXXX" required>
+      <button type="submit">Enter Project</button>
+      <p id="gatewayMessage" role="status"></p>
+    </form>
+  </main>
+  <main id="workspace" hidden>
+    <header><strong>NODE 54</strong><button id="exit" class="quiet">Exit Project</button></header>
+    <section id="home" class="page active">
+      <p class="eyebrow">RUIDOSO FIELD PILOT</p><h1>Node 54</h1><p id="today">Ready for field work.</p>
+      <nav class="actions">
+        <button data-view="poles">Poles / Locations</button><button data-view="staking">Staking Sheets</button>
+        <button data-view="fiber">Fiber / Splicing</button><button data-view="readings">Test Readings</button>
+        <button data-view="photos">Photos</button><button data-view="notes">Notes & Tasks</button>
+      </nav>
+    </section>
+    <section id="detail" class="page" hidden><button id="back" class="quiet">← Node 54</button><h1 id="title"></h1><div id="content"></div></section>
+  </main>
+  <script type="module" src="client/v2/node54Pilot.js"></script>
+</body>
+</html>

@@ -26,3 +26,8 @@ mapboard.*
 
 # Local Claude Code settings
 .claude/
+
+supabase/signing_keys.json
+supabase/V2_DISPOSABLE_SUPABASE_SERVICE_ROLE_KEY
+.v2-local.env
+.supabase-v2-start.log
