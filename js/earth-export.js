@@ -302,11 +302,22 @@ function coord(point){
   return `${Number(point.lng).toFixed(8)},${Number(point.lat).toFixed(8)},0`;
 }
 
-/** Visible name for a pin: "Pole 1748 · 1x4 splitter"; plain poles show the number alone. */
-export function placemarkName(pole, type, { withPolePrefix = false } = {}){
-  const label = earthStyleFor(type).label;
+/**
+ * Visible name for a pin — this is the text Google Earth draws as the label.
+ *
+ *   "2015 · 103 Klamath Rd"   pole with a street address in the dataset
+ *   "1751 · 1x4 splitter"     no address, so the device identifies it instead
+ *   "1752"                    a plain pole with neither
+ *
+ * The street address wins over the device label because that is what the
+ * splicer navigates by, and the device is already carried by the pin colour and
+ * spelled out in the balloon. An address is only ever shown when the dataset
+ * supplied one; none is derived from a nearby record.
+ */
+export function placemarkName(pole, type, { withPolePrefix = false, address = "" } = {}){
   const head = withPolePrefix ? `Pole ${pole}` : String(pole);
-  return label ? `${head} · ${label}` : head;
+  const tail = String(address || "").trim() || earthStyleFor(type).label;
+  return tail ? `${head} · ${tail}` : head;
 }
 
 export function appLocationUrl({ origin = "https://telecomengine.app", projectSlug = "", pole = "" } = {}){
@@ -410,7 +421,7 @@ export function buildContextKml(context = {}){
   const link = appLocationUrl({ origin: appOrigin, projectSlug, pole });
 
   const targetPlacemark = `<Placemark>`
-    + `<name>${escapeXml(placemarkName(pole, targetType, { withPolePrefix: true }))}</name>`
+    + `<name>${escapeXml(placemarkName(pole, targetType, { withPolePrefix: true, address: target.address }))}</name>`
     + `<styleUrl>#${styleId(TARGET_STYLE_PREFIX, targetType)}</styleUrl>`
     + `<description>${cdata(summaryHtml(target, link))}</description>`
     + `<Point><coordinates>${coord(target)}</coordinates></Point>`
@@ -425,7 +436,7 @@ export function buildContextKml(context = {}){
         ? `<description>${cdata(`${Math.round(reference.distanceFeet)} ft from Pole ${escapeXml(pole)}`)}</description>`
         : "";
       return `<Placemark>`
-        + `<name>${escapeXml(placemarkName(referencePole, type))}</name>`
+        + `<name>${escapeXml(placemarkName(referencePole, type, { address: reference.address }))}</name>`
         + `<styleUrl>#${styleId(REF_STYLE_PREFIX, type)}</styleUrl>`
         + distance
         + `<Point><coordinates>${coord(reference)}</coordinates></Point>`
@@ -483,15 +494,159 @@ export function buildContextKml(context = {}){
     + `</Document></kml>`;
 }
 
+/** Folder order for the whole-project layer: the loudest hardware first. */
+const PROJECT_FOLDER_ORDER = Object.freeze([
+  EARTH_TYPES.SPLITTER_1X8,
+  EARTH_TYPES.SPLITTER_1X4,
+  EARTH_TYPES.PCOT_TAP_1X4,
+  EARTH_TYPES.PCOT_TAP_1X2,
+  EARTH_TYPES.TAP_LEG_1X4,
+  EARTH_TYPES.TAP_LEG_1X2,
+  EARTH_TYPES.PASS_THROUGH,
+  EARTH_TYPES.POLE,
+  EARTH_TYPES.UNKNOWN,
+]);
+
+/** Folder titles for the whole-project layer. */
+const PROJECT_FOLDER_NAMES = Object.freeze({
+  [EARTH_TYPES.SPLITTER_1X8]: "1x8 splitters",
+  [EARTH_TYPES.SPLITTER_1X4]: "1x4 splitters",
+  [EARTH_TYPES.PCOT_TAP_1X4]: "1x4 PCOT taps",
+  [EARTH_TYPES.PCOT_TAP_1X2]: "1x2 PCOT taps",
+  [EARTH_TYPES.TAP_LEG_1X4]: "1x4 tap legs",
+  [EARTH_TYPES.TAP_LEG_1X2]: "1x2 tap legs",
+  [EARTH_TYPES.PASS_THROUGH]: "Pass-through / MST only",
+  [EARTH_TYPES.POLE]: "Poles",
+  [EARTH_TYPES.UNKNOWN]: "Unresolved",
+});
+
+/** Centre and a framing range for a set of poles. */
+function fitLookAt(poles){
+  const lats = poles.map((pole) => Number(pole.lat));
+  const lngs = poles.map((pole) => Number(pole.lng));
+  const south = Math.min(...lats), north = Math.max(...lats);
+  const west = Math.min(...lngs), east = Math.max(...lngs);
+  const centre = { lat: (south + north) / 2, lng: (west + east) / 2 };
+  const diagonal = distanceMeters({ lat: south, lng: west }, { lat: north, lng: east });
+  // Enough range to hold the whole run, with a floor so a one-pole project is
+  // not framed from the ground.
+  return { ...centre, range: Math.max(400, Math.round(diagonal * 1.3)) };
+}
+
 /**
- * Zip the KML into a .kmz.
+ * Build the whole-project pole layer: every pole the dataset places, each
+ * labelled with its number, coloured by what the design puts on it.
+ *
+ * Loaded once and left on, this is what puts a number beside every pole in
+ * Google Earth wherever the splicer happens to be standing, instead of a file
+ * that re-centres on one location. Poles are grouped into a folder per device
+ * type so a crowded run can be thinned from the Earth sidebar.
+ *
+ * @param {object} context
+ * @param {Array}  context.poles  [{ pole, lat, lng, type, address, enclosureUnit, devices }]
+ * @returns {string} KML document text
+ */
+export function buildProjectKml(context = {}){
+  const {
+    poles = [],
+    projectName = "",
+    projectSlug = "",
+    appOrigin = "https://telecomengine.app",
+    paths = [],
+  } = context;
+
+  const placed = (Array.isArray(poles) ? poles : []).filter(hasCoords).filter((pole) => String(pole.pole ?? "").trim());
+  if (!placed.length) throw new Error("No pole in this project has coordinates to export.");
+
+  const documentName = projectName
+    ? `TelecomEngine — ${projectName} poles`
+    : "TelecomEngine — project poles";
+  const view = fitLookAt(placed);
+
+  const byType = new Map();
+  for (const pole of placed){
+    const type = pole.type || EARTH_TYPES.UNKNOWN;
+    if (!byType.has(type)) byType.set(type, []);
+    byType.get(type).push(pole);
+  }
+
+  const folders = PROJECT_FOLDER_ORDER
+    .filter((type) => byType.has(type))
+    .map((type) => {
+      const group = byType.get(type).slice().sort((a, b) => String(a.pole).localeCompare(String(b.pole), "en", { numeric: true }));
+      const placemarks = group.map((pole) => {
+        const rows = [
+          { label: "Pole", value: pole.pole },
+          { label: "Type", value: earthStyleFor(type).label || "pole" },
+          pole.address ? { label: "Address", value: pole.address } : null,
+          pole.enclosureUnit ? { label: "Enclosure unit", value: pole.enclosureUnit } : null,
+        ].filter(Boolean);
+        const link = appLocationUrl({ origin: appOrigin, projectSlug, pole: pole.pole });
+        return `<Placemark>`
+          + `<name>${escapeXml(placemarkName(pole.pole, type, { address: pole.address }))}</name>`
+          + `<styleUrl>#${styleId(REF_STYLE_PREFIX, type)}</styleUrl>`
+          + `<description>${cdata(summaryHtml({ ...pole, summary: rows }, link))}</description>`
+          + `<Point><coordinates>${coord(pole)}</coordinates></Point>`
+          + `</Placemark>`;
+      }).join("");
+      return `<Folder><name>${escapeXml(PROJECT_FOLDER_NAMES[type] || "Poles")} (${group.length})</name><open>0</open>${placemarks}</Folder>`;
+    })
+    .join("");
+
+  const pathPlacemarks = (Array.isArray(paths) ? paths : [])
+    .map((path) => ({
+      name: path?.name || "Cable path",
+      points: (Array.isArray(path?.coordinates) ? path.coordinates : []).filter(hasCoords),
+    }))
+    .filter((path) => path.points.length >= 2)
+    .map((path) => `<Placemark>`
+      + `<name>${escapeXml(path.name)}</name>`
+      + `<styleUrl>#${PATH_STYLE_ID}</styleUrl>`
+      + `<LineString><tessellate>1</tessellate>`
+      + `<coordinates>${path.points.map(coord).join(" ")}</coordinates>`
+      + `</LineString></Placemark>`)
+    .join("");
+
+  const legendPlacemarks = EARTH_LEGEND_ORDER.map((type) => `<Placemark>`
+    + `<name>${escapeXml(earthStyleFor(type).legend)}</name>`
+    + `<visibility>0</visibility>`
+    + `<styleUrl>#${styleId(LEGEND_STYLE_PREFIX, type)}</styleUrl>`
+    + `<Point><coordinates>${coord(view)}</coordinates></Point>`
+    + `</Placemark>`).join("");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>\n`
+    + `<kml xmlns="http://www.opengis.net/kml/2.2">`
+    + `<Document>`
+    + `<name>${escapeXml(documentName)}</name>`
+    + `<open>1</open>`
+    + `<LookAt>`
+    + `<longitude>${view.lng.toFixed(8)}</longitude>`
+    + `<latitude>${view.lat.toFixed(8)}</latitude>`
+    + `<altitude>0</altitude><heading>0</heading><tilt>0</tilt>`
+    + `<range>${view.range}</range>`
+    + `<altitudeMode>relativeToGround</altitudeMode>`
+    + `</LookAt>`
+    + buildStyles()
+    + folders
+    + (pathPlacemarks ? `<Folder><name>Paths</name><open>0</open>${pathPlacemarks}</Folder>` : "")
+    + `<Folder><name>Legend</name><visibility>0</visibility><open>0</open>${legendPlacemarks}</Folder>`
+    + `</Document></kml>`;
+}
+
+/** TE_<project>_AllPoles.kmz */
+export function earthProjectKmzFileName({ projectSlug = "" } = {}){
+  const slug = String(projectSlug || "project").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
+  return `TE_${slug}_AllPoles.kmz`;
+}
+
+/**
+ * Zip a KML document into a .kmz.
  *
  * `loadZip` supplies the JSZip constructor (the app already loads it for its
  * other KMZ work); keeping it injected leaves this module dependency-free.
  */
-export async function buildContextKmz(context, { loadZip, type = "blob" } = {}){
-  if (typeof loadZip !== "function") throw new Error("buildContextKmz needs a loadZip factory.");
-  const kml = buildContextKml(context);
+export async function zipKmlToKmz(kml, { loadZip, type = "blob" } = {}){
+  if (typeof loadZip !== "function") throw new Error("zipKmlToKmz needs a loadZip factory.");
   const JSZip = await loadZip();
   const zip = new JSZip();
   zip.file("doc.kml", kml);
@@ -501,4 +656,13 @@ export async function buildContextKmz(context, { loadZip, type = "blob" } = {}){
     compression: "DEFLATE",
   });
   return { blob, kml };
+}
+
+export async function buildContextKmz(context, options = {}){
+  return await zipKmlToKmz(buildContextKml(context), options);
+}
+
+/** The whole-project pole layer, packaged the same way. */
+export async function buildProjectKmz(context, options = {}){
+  return await zipKmlToKmz(buildProjectKml(context), options);
 }

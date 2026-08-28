@@ -94,8 +94,10 @@ import {
 } from "./services/ebc/index.mjs";
 import {
   buildContextKmz,
+  buildProjectKmz,
   EARTH_TYPES,
   earthKmzFileName,
+  earthProjectKmzFileName,
   earthStyleFor,
   poleNumberFromName,
   resolveLocationType,
@@ -43305,6 +43307,35 @@ const EARTH_APP_ORIGIN = "https://telecomengine.app";
 const EARTH_REFERENCE_OPTIONS = Object.freeze({ limit: 8, radiusFeet: 500, minimum: 4 });
 const EARTH_LOOKAT_RANGE_M = 250;
 
+/**
+ * TDS attribute names that may carry a street address for a location.
+ *
+ * The exporter reads whichever of these the export actually supplies, in this
+ * order, and shows nothing when none is present. An address is never derived
+ * from a nearby service location: the pole a splicer is standing at and the
+ * house beside it are different records, and pairing them by distance would put
+ * a wrong address on a staking label.
+ */
+const EARTH_ADDRESS_FIELDS = Object.freeze([
+  "Address",
+  "Full Address",
+  "Street Address",
+  "Site Address",
+  "Location Address",
+  "Service Location Address",
+]);
+
+/** Street address for a KMZ row, from the KML <address> element or a TDS field. */
+function earthAddressFrom(row, fields){
+  const direct = String(row?.__address || "").trim();
+  if (direct) return direct;
+  for (const name of EARTH_ADDRESS_FIELDS){
+    const value = String(fields?.[name] || "").trim();
+    if (value) return value;
+  }
+  return "";
+}
+
 /** Project slug for the file name and the link back into the app. */
 function earthProjectSlug(){
   const design = state.ebc?.design;
@@ -43339,7 +43370,7 @@ function buildEarthPoleIndex(){
     const pole = String(poleValue || "").trim();
     if (!pole) return null;
     if (!index.has(pole)){
-      index.set(pole, { pole, lat: null, lng: null, devices: [], enclosureUnit: null, hasEnclosure: undefined });
+      index.set(pole, { pole, lat: null, lng: null, devices: [], enclosureUnit: null, hasEnclosure: undefined, address: "" });
     }
     return index.get(pole);
   };
@@ -43398,6 +43429,7 @@ function buildEarthPoleIndex(){
         if (entry){
           enumerated.add(entry.pole);
           setCoords(entry, row.latitude, row.longitude);
+          if (!entry.address) entry.address = earthAddressFrom(row, fields);
         }
       }
       const cpName = fields[TDS_FIELDS.connectivityPoint.name];
@@ -43411,6 +43443,7 @@ function buildEarthPoleIndex(){
             entry.enclosureUnit = fields[TDS_FIELDS.connectivityPoint.enclosureUnit];
           }
           setCoords(entry, row.latitude, row.longitude);
+          if (!entry.address) entry.address = earthAddressFrom(row, fields);
         }
       }
       if (fields[TDS_FIELDS.device.name]){
@@ -43493,6 +43526,7 @@ function buildEarthTargetSummary(entry, site){
     ["Pole", entry.pole],
     ["Type", style.label || "pole"],
   ];
+  if (entry.address) rows.push(["Address", entry.address]);
   if (site && getSiteDisplayName(site) !== entry.pole) rows.push(["Location", getSiteDisplayName(site)]);
   if (entry.enclosureUnit) rows.push(["Enclosure unit", entry.enclosureUnit]);
 
@@ -43551,6 +43585,63 @@ function buildEarthContext({ pole, lat, lng, site = null }){
   };
 }
 
+/**
+ * Export every pole in the project as one Google Earth layer.
+ *
+ * The per-location context KMZ answers "what is around me right now"; this one
+ * answers "put a number beside every pole". Loaded once and left switched on in
+ * Google Earth, it labels the whole run wherever the splicer pans, instead of
+ * re-centring on whichever location was tapped.
+ */
+async function openProjectPolesInGoogleEarth(){
+  const index = buildEarthPoleIndex();
+  const poles = [...index.values()].filter((entry) => entry.lat !== null && entry.lng !== null);
+  if (!poles.length){
+    toast("Google Earth", "No pole in this project has coordinates yet. Load the design KMZ first.", "error");
+    return;
+  }
+  const projectSlug = earthProjectSlug();
+  const fileName = earthProjectKmzFileName({ projectSlug });
+  let blob;
+  try {
+    ({ blob } = await buildProjectKmz({
+      poles,
+      projectName: state.activeProject?.name || "",
+      projectSlug,
+      appOrigin: EARTH_APP_ORIGIN,
+      paths: buildEarthPaths(poles.map((entry) => entry.pole)),
+    }, { loadZip: loadJsZip }));
+  } catch (error){
+    toast("Google Earth", error?.message || "Could not build the pole layer.", "error");
+    return;
+  }
+  await deliverEarthKmz(blob, fileName, `${poles.length} poles`);
+}
+
+/**
+ * Hand a finished .kmz to the platform.
+ *
+ * On a phone that can share files the share sheet lets the splicer pick Google
+ * Earth directly; everywhere else it downloads for File > Import.
+ */
+async function deliverEarthKmz(blob, fileName, title){
+  const file = typeof File === "function"
+    ? new File([blob], fileName, { type: "application/vnd.google-earth.kmz" })
+    : null;
+  if (file && navigator.canShare?.({ files: [file] }) && typeof navigator.share === "function"){
+    try {
+      await navigator.share({ files: [file], title });
+      return;
+    } catch (error){
+      // A cancelled share sheet is not a failure; fall through to the download
+      // so the splicer still ends up with the file either way.
+      if (error?.name === "AbortError") return;
+    }
+  }
+  downloadEarthKmz(blob, fileName);
+  toast("Google Earth", `${fileName} downloaded. Open it with File > Import in Google Earth.`);
+}
+
 /** The old single-pin behaviour, kept for a phone with no Google Earth installed. */
 function googleEarthPinUrl(lat, lng){
   return `https://earth.google.com/web/search/${Number(lat)},${Number(lng)}`;
@@ -43588,21 +43679,7 @@ async function openLocationInGoogleEarth({ pole, lat, lng, site = null }){
     return;
   }
 
-  const file = typeof File === "function"
-    ? new File([blob], built.fileName, { type: "application/vnd.google-earth.kmz" })
-    : null;
-  if (file && navigator.canShare?.({ files: [file] }) && typeof navigator.share === "function"){
-    try {
-      await navigator.share({ files: [file], title: `Pole ${built.context.target.pole}` });
-      return;
-    } catch (error){
-      // A cancelled share sheet is not a failure; fall through to the download
-      // so the splicer still ends up with the file either way.
-      if (error?.name === "AbortError") return;
-    }
-  }
-  downloadEarthKmz(blob, built.fileName);
-  toast("Google Earth", `${built.fileName} downloaded. Open it with File > Import in Google Earth.`);
+  await deliverEarthKmz(blob, built.fileName, `Pole ${built.context.target.pole}`);
 }
 
 /** Buttons shared by every location view that can export. */
@@ -43629,6 +43706,13 @@ function bindEarthExportActions(){
   if (_earthActionsBound) return;
   _earthActionsBound = true;
   document.addEventListener("click", (event) => {
+    const projectButton = event.target.closest?.("[data-earth-action='project']");
+    if (projectButton && !projectButton.disabled){
+      event.preventDefault();
+      setButtonBusy(projectButton, true);
+      void openProjectPolesInGoogleEarth().finally(() => setButtonBusy(projectButton, false));
+      return;
+    }
     const button = event.target.closest?.("[data-earth-action='context']");
     if (!button || button.disabled) return;
     event.preventDefault();
@@ -43647,6 +43731,7 @@ SpecCom.earth = {
   buildContext: buildEarthContext,
   poleIndex: buildEarthPoleIndex,
   open: openLocationInGoogleEarth,
+  openProject: openProjectPolesInGoogleEarth,
 };
 
 /* ==========================================================================

@@ -5,11 +5,13 @@ import {
   appLocationUrl,
   buildContextKml,
   buildContextKmz,
+  buildProjectKml,
   distanceFeet,
   EARTH_LEGEND_ORDER,
   EARTH_STYLE_TABLE,
   EARTH_TYPES,
   earthKmzFileName,
+  earthProjectKmzFileName,
   earthStyleFor,
   placemarkName,
   poleNumberFromName,
@@ -446,4 +448,86 @@ test("buildContextKmz refuses to run without a zip factory", async () => {
     () => buildContextKmz({ target: INDEX.get("1748") }, {}),
     /loadZip/,
   );
+});
+
+/* -- labels: pole number, and the street address when the data has one ------ */
+
+test("a label pairs the pole number with its street address", () => {
+  assert.equal(
+    placemarkName("2015", EARTH_TYPES.PASS_THROUGH, { address: "103 Klamath Rd" }),
+    "2015 · 103 Klamath Rd",
+  );
+  assert.equal(
+    placemarkName("2017", EARTH_TYPES.PCOT_TAP_1X4, { address: "203 Klamath Rd" }),
+    "2017 · 203 Klamath Rd",
+  );
+});
+
+test("with no address the device identifies the pole instead", () => {
+  assert.equal(placemarkName("1751", EARTH_TYPES.SPLITTER_1X4), "1751 · 1x4 splitter");
+  assert.equal(placemarkName("1752", EARTH_TYPES.POLE), "1752", "a plain pole is its number alone");
+  assert.equal(placemarkName("1749", EARTH_TYPES.UNKNOWN), "1749 · ?");
+});
+
+test("a blank address never displaces the device label", () => {
+  assert.equal(placemarkName("1751", EARTH_TYPES.SPLITTER_1X4, { address: "   " }), "1751 · 1x4 splitter");
+});
+
+test("the context KML carries the address through to the label", () => {
+  const target = { ...INDEX.get("1748"), address: "204 Angeles Dr", summary: [] };
+  const kml = buildContextKml({
+    target,
+    references: [{ ...INDEX.get("1751"), address: "206 Angeles Dr" }],
+    projectSlug: "ruidoso",
+  });
+  assert.ok(kml.includes("<name>Pole 1748 · 204 Angeles Dr</name>"));
+  assert.ok(kml.includes("<name>1751 · 206 Angeles Dr</name>"));
+});
+
+/* -- the whole-project pole layer ------------------------------------------ */
+
+function projectPoles(){
+  return [...INDEX.values()].filter((entry) => entry.lat !== null && entry.lng !== null);
+}
+
+test("the project layer places every pole that has coordinates", () => {
+  const poles = projectPoles();
+  const kml = buildProjectKml({ poles, projectName: "ruidoso revisit", projectSlug: "ruidoso" });
+  assert.equal((kml.match(/<Point>/g) || []).length, poles.length + EARTH_LEGEND_ORDER.length,
+    "one placemark per pole, plus the hidden legend");
+  for (const pole of poles){
+    assert.ok(kml.includes(`>${pole.pole}`) || kml.includes(`>${pole.pole} ·`), `pole ${pole.pole} is labelled`);
+  }
+});
+
+test("the project layer groups poles into a folder per device type", () => {
+  const kml = buildProjectKml({ poles: projectPoles(), projectSlug: "ruidoso" });
+  const folders = [...kml.matchAll(/<Folder><name>([^<]+)<\/name>/g)].map((match) => match[1]);
+  assert.ok(folders.some((name) => name.startsWith("1x8 splitters (")), `saw ${folders.join(", ")}`);
+  assert.ok(folders.some((name) => name.startsWith("Poles (")));
+  assert.ok(folders.some((name) => name.startsWith("Unresolved (")));
+  assert.equal(folders.at(-1), "Legend", "the legend stays last");
+});
+
+test("the project layer frames the whole run, not one pole", () => {
+  const kml = buildProjectKml({ poles: projectPoles(), projectSlug: "ruidoso" });
+  const range = Number(/<range>(\d+)<\/range>/.exec(kml)[1]);
+  assert.ok(range >= 400, `expected a framing range, got ${range}`);
+  assert.match(kml, /<tilt>0<\/tilt>/);
+});
+
+test("the project layer keeps the engineer's colours", () => {
+  const kml = buildProjectKml({ poles: projectPoles(), projectSlug: "ruidoso" });
+  assert.ok(kml.includes(`<styleUrl>#te-ref-splitter-1x8</styleUrl>`));
+  assert.match(kml, /<Style id="te-ref-splitter-1x8"><IconStyle><color>ff0000ff<\/color>/);
+});
+
+test("the project layer refuses an empty or coordinate-less set", () => {
+  assert.throws(() => buildProjectKml({ poles: [] }), /coordinates/);
+  assert.throws(() => buildProjectKml({ poles: [{ pole: "1748" }] }), /coordinates/);
+});
+
+test("the project file name follows TE_<project>_AllPoles.kmz", () => {
+  assert.equal(earthProjectKmzFileName({ projectSlug: "ruidoso" }), "TE_ruidoso_AllPoles.kmz");
+  assert.equal(earthProjectKmzFileName({}), "TE_project_AllPoles.kmz");
 });
