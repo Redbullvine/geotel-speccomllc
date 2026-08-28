@@ -105,12 +105,25 @@ export function buildSplicePoles(design, options = {}){
     const point = networkPoints.get(np) || null;
     const devices = devicesByNp.get(np) || [];
 
+    // An endpoint that resolves to no network-point record is not a pole. It
+    // still becomes an entry so its cables are not silently lost, but it is
+    // flagged so a consumer that draws poles on a map can leave it out rather
+    // than labelling a connectivity point "POLE 12801".
+    if (!point){
+      warnings.push(`${np} is used as a cable endpoint but is not a network point in this export; it is not a pole.`);
+    }
+
+    // extractTdsDesign() records a network point's position as `coords`; the
+    // flat lat/lng form is accepted too for hand-built input.
+    const coords = point?.coords || point || null;
+
     poles.push({
       id: np,
       name: `POLE ${np}`,
+      isNetworkPoint: Boolean(point),
       enclosure: point?.type || null,
-      lat: point?.lat ?? null,
-      lng: point?.lng ?? null,
+      lat: coords?.lat ?? null,
+      lng: coords?.lng ?? null,
       source: POLE_SOURCE.TDS_IMPORT,
       cables: parsedCables,
       splitters: splittersFromDevices(devices),
