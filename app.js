@@ -85,10 +85,22 @@ import {
   PCOT_RATIOS,
   recommendPcot as ebcRecommend,
   specsAreEngineeringApproved,
+  TDS_FIELDS,
+  tdsDescriptionFields,
+  tdsIdNumber,
   unspecifiedRatios as ebcUnspecifiedRatios,
   usableRatios as ebcUsableRatios,
   whatIf as ebcWhatIf,
 } from "./services/ebc/index.mjs";
+import {
+  buildContextKmz,
+  EARTH_TYPES,
+  earthKmzFileName,
+  earthStyleFor,
+  poleNumberFromName,
+  resolveLocationType,
+  selectReferencePoles,
+} from "./js/earth-export.js";
 
 const isDebug = new URLSearchParams(location.search).has("debug");
 const dlog = (...args) => { if (isDebug) console.log(...args); };
@@ -6456,6 +6468,11 @@ function buildSiteMarkerPopupHtml(site, {
   const deleteButtonHtml = canDeleteSite
     ? `<button type="button" class="scSitePopup-action is-danger" data-popup-action="delete" data-popup-site-id="${escapeHtml(siteId)}">Delete location</button>`
     : "";
+  // Context KMZ for this pole: the target, its neighbours and the legend, not
+  // a bare pin. The plain pin stays as the fallback when Earth is not installed.
+  const earthHtml = coords
+    ? renderEarthActions({ pole: poleNumberFromName(locationName), lat: coords.lat, lng: coords.lng, compact: true })
+    : "";
   return `
     <div class="scSitePopup" data-popup-site-id="${escapeHtml(siteId)}">
       <div class="scSitePopup-top">
@@ -6466,6 +6483,7 @@ function buildSiteMarkerPopupHtml(site, {
         ${pagerHtml}
       </div>
       ${renderSiteTestResultChip(site)}
+      ${earthHtml}
       ${locationsHtml}
       <div class="scSitePopup-grid">
         ${gridRows.map((row) => `
@@ -31233,6 +31251,12 @@ function renderLocations(){
     const fiberBtn = isViewAllowed("viewEbc")
       ? `<button class="btn ghost small" data-action="openFiberEngineer" data-pole="${escapeHtml(String(r.name || r.id || ""))}">Open in Fiber Engineer</button>`
       : "";
+    const earthBtn = renderEarthActions({
+      pole: poleNumberFromName(r.name || displayName),
+      lat: r.gps?.lat,
+      lng: r.gps?.lng,
+      compact: true,
+    });
     const editNameBtn = r.isEditingName
       ? ""
       : `<button class="btn ghost small" data-action="editName" data-id="${r.id}" ${billingLocked || disableActions ? "disabled" : ""}>Edit name</button>`;
@@ -31264,6 +31288,7 @@ function renderLocations(){
             ${fiberBtn}
             ${editNameBtn}
           </div>
+          ${earthBtn}
         </div>
       </div>
       <div class="hr"></div>
@@ -42026,6 +42051,7 @@ async function startApp(){
   initAuth();
   ensureHelpPanel();
   wireWorkPackageModal();
+  bindEarthExportActions();
   if (consumeDemoCinematicIntro() && String(window.location.hash || "").toLowerCase().startsWith("#demo")){
     queueMicrotask(() => openDemoPlatform());
   }
@@ -43261,6 +43287,366 @@ SpecCom.ebc = {
   recalculate: ebcRecalculate,
   buildLeg: buildEbcLeg,
   openLocation: (identifier) => window.openLocationInEbc(identifier),
+};
+
+
+/* ==========================================================================
+   Open in Google Earth — context KMZ export
+   Read-only. Builds a .kmz from data already parsed for the map and the Fiber
+   Engineer, and never writes to project records, FADs or the dataset.
+
+   A single dropped pin tells the splicer nothing he does not already know. The
+   context KMZ puts the target location, its nearest poles with their pole
+   numbers, the cable paths between them where the design carries geometry, and
+   the colour legend into one file Google Earth opens directly.
+   ========================================================================== */
+
+const EARTH_APP_ORIGIN = "https://telecomengine.app";
+const EARTH_REFERENCE_OPTIONS = Object.freeze({ limit: 8, radiusFeet: 500, minimum: 4 });
+const EARTH_LOOKAT_RANGE_M = 250;
+
+/** Project slug for the file name and the link back into the app. */
+function earthProjectSlug(){
+  const design = state.ebc?.design;
+  const market = (design?.allDevices || []).find((device) => device.market)?.market
+    || (design?.devices || []).find((device) => device.market)?.market
+    || "";
+  const raw = market
+    || state.activeProject?.job_number
+    || state.activeProject?.name
+    || "project";
+  return String(raw).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
+}
+
+/**
+ * Every pole we can place on the map, keyed by pole number.
+ *
+ * Three sources, merged, richest first:
+ *   1. the TDS design imported in the Fiber Engineer (network points,
+ *      connectivity points, devices, cable geometry),
+ *   2. the engineer's KMZ loaded as a map layer, read straight from each
+ *      placemark's TDS attribute table,
+ *   3. the project's own pinned sites, which give coordinates but say nothing
+ *      about what hardware is on the pole.
+ *
+ * `hasEnclosure` is only set false when a source that lists every connectivity
+ * point was read and none pointed at this pole. Absence of a source is not
+ * evidence of an empty pole.
+ */
+function buildEarthPoleIndex(){
+  const index = new Map();
+  const entryFor = (poleValue) => {
+    const pole = String(poleValue || "").trim();
+    if (!pole) return null;
+    if (!index.has(pole)){
+      index.set(pole, { pole, lat: null, lng: null, devices: [], enclosureUnit: null, hasEnclosure: undefined });
+    }
+    return index.get(pole);
+  };
+  const setCoords = (entry, lat, lng) => {
+    if (!entry || entry.lat !== null) return;
+    const latNum = toFiniteNumberOrNull(lat);
+    const lngNum = toFiniteNumberOrNull(lng);
+    if (latNum === null || lngNum === null) return;
+    entry.lat = latNum;
+    entry.lng = lngNum;
+  };
+  // Poles a full topology source listed, so "no enclosure here" is a fact.
+  const enumerated = new Set();
+
+  // --- 1. Imported TDS design -------------------------------------------
+  const design = state.ebc?.design;
+  if (design){
+    for (const point of design.networkPoints || []){
+      const entry = entryFor(point.np);
+      if (!entry) continue;
+      enumerated.add(entry.pole);
+      setCoords(entry, point.coords?.lat, point.coords?.lng);
+    }
+    for (const point of design.connectivityPoints || []){
+      const entry = entryFor(point.np);
+      if (!entry) continue;
+      enumerated.add(entry.pole);
+      entry.hasEnclosure = true;
+      if (!entry.enclosureUnit && point.enclosureUnit) entry.enclosureUnit = point.enclosureUnit;
+      setCoords(entry, point.coords?.lat, point.coords?.lng);
+    }
+    for (const device of design.allDevices || []){
+      const entry = entryFor(device.np);
+      if (!entry) continue;
+      enumerated.add(entry.pole);
+      entry.hasEnclosure = true;
+      entry.devices.push(device);
+      setCoords(entry, device.coords?.lat, device.coords?.lng);
+    }
+  }
+
+  // --- 2. The engineer's KMZ on the map ----------------------------------
+  const kmzRows = Array.from(state.map?.kmzFeatureRows?.values?.() || []);
+  if (kmzRows.length){
+    const parsed = kmzRows.map((row) => ({ row, fields: tdsDescriptionFields(row?.raw_description_html || "") }));
+    const cpToNp = new Map();
+    for (const { fields } of parsed){
+      const cp = fields[TDS_FIELDS.connectivityPoint.name];
+      const np = fields[TDS_FIELDS.connectivityPoint.networkPoint];
+      if (cp && np && !fields[TDS_FIELDS.device.name]) cpToNp.set(tdsIdNumber(cp), tdsIdNumber(np));
+    }
+    for (const { row, fields } of parsed){
+      const networkPointName = fields[TDS_FIELDS.networkPoint.name];
+      if (networkPointName){
+        const entry = entryFor(tdsIdNumber(networkPointName));
+        if (entry){
+          enumerated.add(entry.pole);
+          setCoords(entry, row.latitude, row.longitude);
+        }
+      }
+      const cpName = fields[TDS_FIELDS.connectivityPoint.name];
+      const cpNetworkPoint = fields[TDS_FIELDS.connectivityPoint.networkPoint];
+      if (cpName && cpNetworkPoint && !fields[TDS_FIELDS.device.name]){
+        const entry = entryFor(tdsIdNumber(cpNetworkPoint));
+        if (entry){
+          enumerated.add(entry.pole);
+          entry.hasEnclosure = true;
+          if (!entry.enclosureUnit && fields[TDS_FIELDS.connectivityPoint.enclosureUnit]){
+            entry.enclosureUnit = fields[TDS_FIELDS.connectivityPoint.enclosureUnit];
+          }
+          setCoords(entry, row.latitude, row.longitude);
+        }
+      }
+      if (fields[TDS_FIELDS.device.name]){
+        const np = cpToNp.get(tdsIdNumber(fields[TDS_FIELDS.device.connectivityPoint] || ""));
+        const entry = entryFor(np);
+        if (entry){
+          enumerated.add(entry.pole);
+          entry.hasEnclosure = true;
+          entry.devices.push({
+            deviceType: fields[TDS_FIELDS.device.type] || null,
+            materialUnit: fields[TDS_FIELDS.device.materialUnit] || null,
+            splitterPath: fields[TDS_FIELDS.device.splitterPath] || null,
+            splitterOrder: fields[TDS_FIELDS.device.splitterOrder] || null,
+            splitterRatio: fields[TDS_FIELDS.device.splitterRatio] || null,
+          });
+          setCoords(entry, row.latitude, row.longitude);
+        }
+      }
+    }
+  }
+
+  // --- 3. The project's pinned sites -------------------------------------
+  for (const site of getVisibleSites()){
+    const entry = entryFor(poleNumberFromName(getSiteDisplayName(site)));
+    if (!entry) continue;
+    const coords = getSiteCoords(site);
+    setCoords(entry, coords?.lat, coords?.lng);
+  }
+
+  for (const entry of index.values()){
+    if (entry.hasEnclosure === undefined && enumerated.has(entry.pole)) entry.hasEnclosure = false;
+    entry.type = resolveLocationType(entry);
+  }
+  return index;
+}
+
+/** Cable paths between the exported poles — only where real geometry exists. */
+function buildEarthPaths(poleNumbers){
+  const wanted = new Set(Array.from(poleNumbers).map((value) => String(value)));
+  const paths = [];
+  const seen = new Set();
+
+  const design = state.ebc?.design;
+  for (const cable of design?.cables || []){
+    if (!Array.isArray(cable.geometry) || cable.geometry.length < 2) continue;
+    const start = String(design.cpToNp?.[cable.startCp] ?? "");
+    const end = String(design.cpToNp?.[cable.endCp] ?? "");
+    if (!wanted.has(start) || !wanted.has(end)) continue;
+    const key = `design:${cable.name || `${start}-${end}`}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    paths.push({
+      name: cable.name || `Cable ${start} – ${end}`,
+      coordinates: cable.geometry.map((point) => ({ lat: point.lat, lng: point.lng })),
+    });
+  }
+
+  for (const row of Array.from(state.map?.kmzFeatureRows?.values?.() || [])){
+    if (row?.geometry?.type !== "LineString") continue;
+    const fields = tdsDescriptionFields(row?.raw_description_html || "");
+    const start = tdsIdNumber(fields[TDS_FIELDS.path.startNp] || "");
+    const end = tdsIdNumber(fields[TDS_FIELDS.path.endNp] || "");
+    if (!start || !end || !wanted.has(start) || !wanted.has(end)) continue;
+    const name = fields[TDS_FIELDS.path.name] || row.__display_name || `Path ${start} – ${end}`;
+    const key = `kmz:${name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    paths.push({
+      name,
+      coordinates: (row.geometry.coordinates || []).map(([lng, lat]) => ({ lat, lng })),
+    });
+  }
+  return paths;
+}
+
+/** The summary the app already shows for a location, as description rows. */
+function buildEarthTargetSummary(entry, site){
+  const style = earthStyleFor(entry.type);
+  const rows = [
+    ["Pole", entry.pole],
+    ["Type", style.label || "pole"],
+  ];
+  if (site && getSiteDisplayName(site) !== entry.pole) rows.push(["Location", getSiteDisplayName(site)]);
+  if (entry.enclosureUnit) rows.push(["Enclosure unit", entry.enclosureUnit]);
+
+  const splitterPaths = [...new Set((entry.devices || []).map((device) => device.splitterPath).filter(Boolean))];
+  if (splitterPaths.length) rows.push(["Splitter path", splitterPaths.join(", ")]);
+
+  const materialUnits = (entry.devices || []).map((device) => device.materialUnit).filter(Boolean);
+  if (materialUnits.length){
+    const counts = new Map();
+    for (const unit of materialUnits) counts.set(unit, (counts.get(unit) || 0) + 1);
+    rows.push(["Devices", [...counts.entries()].map(([unit, count]) => (count > 1 ? `${unit} x${count}` : unit)).join(", ")]);
+  }
+  rows.push(["Devices recorded", String((entry.devices || []).length)]);
+  if (entry.type === EARTH_TYPES.UNKNOWN){
+    rows.push(["Note", "The design fields at this location do not resolve to a known device. Exported as unknown rather than guessed."]);
+  }
+  if (state.activeProject?.name) rows.push(["Project", state.activeProject.name]);
+  return rows.map(([label, value]) => ({ label, value }));
+}
+
+/**
+ * Assemble the export context for one location.
+ * @returns {{context: object, fileName: string}|null}
+ */
+function buildEarthContext({ pole, lat, lng, site = null }){
+  const index = buildEarthPoleIndex();
+  const poleNumber = String(pole || "").trim();
+  const known = poleNumber ? index.get(poleNumber) : null;
+  const targetLat = toFiniteNumberOrNull(lat ?? known?.lat);
+  const targetLng = toFiniteNumberOrNull(lng ?? known?.lng);
+  if (!poleNumber || targetLat === null || targetLng === null) return null;
+
+  const target = {
+    ...(known || { pole: poleNumber, devices: [], enclosureUnit: null, hasEnclosure: undefined }),
+    pole: poleNumber,
+    lat: targetLat,
+    lng: targetLng,
+  };
+  target.type = known ? known.type : resolveLocationType(target);
+  target.summary = buildEarthTargetSummary(target, site);
+
+  const references = selectReferencePoles(target, [...index.values()], EARTH_REFERENCE_OPTIONS);
+  const paths = buildEarthPaths([target.pole, ...references.map((reference) => reference.pole)]);
+  const projectSlug = earthProjectSlug();
+
+  return {
+    context: {
+      target,
+      references,
+      paths,
+      projectSlug,
+      appOrigin: EARTH_APP_ORIGIN,
+      lookAtRangeMeters: EARTH_LOOKAT_RANGE_M,
+    },
+    fileName: earthKmzFileName({ projectSlug, pole: poleNumber }),
+  };
+}
+
+/** The old single-pin behaviour, kept for a phone with no Google Earth installed. */
+function googleEarthPinUrl(lat, lng){
+  return `https://earth.google.com/web/search/${Number(lat)},${Number(lng)}`;
+}
+
+function downloadEarthKmz(blob, fileName){
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/**
+ * Generate the context KMZ and hand it to the platform.
+ *
+ * On a phone that supports sharing files, the share sheet lets the splicer pick
+ * Google Earth directly. Everywhere else the file downloads and desktop Earth
+ * or earth.google.com opens it through File > Import.
+ */
+async function openLocationInGoogleEarth({ pole, lat, lng, site = null }){
+  const built = buildEarthContext({ pole, lat, lng, site });
+  if (!built){
+    toast("Google Earth", "This location has no pole number and coordinates to export.", "error");
+    return;
+  }
+  let blob;
+  try {
+    ({ blob } = await buildContextKmz(built.context, { loadZip: loadJsZip }));
+  } catch (error){
+    toast("Google Earth", error?.message || "Could not build the context KMZ.", "error");
+    return;
+  }
+
+  const file = typeof File === "function"
+    ? new File([blob], built.fileName, { type: "application/vnd.google-earth.kmz" })
+    : null;
+  if (file && navigator.canShare?.({ files: [file] }) && typeof navigator.share === "function"){
+    try {
+      await navigator.share({ files: [file], title: `Pole ${built.context.target.pole}` });
+      return;
+    } catch (error){
+      // A cancelled share sheet is not a failure; fall through to the download
+      // so the splicer still ends up with the file either way.
+      if (error?.name === "AbortError") return;
+    }
+  }
+  downloadEarthKmz(blob, built.fileName);
+  toast("Google Earth", `${built.fileName} downloaded. Open it with File > Import in Google Earth.`);
+}
+
+/** Buttons shared by every location view that can export. */
+function renderEarthActions({ pole, lat, lng, compact = false }){
+  const latNum = toFiniteNumberOrNull(lat);
+  const lngNum = toFiniteNumberOrNull(lng);
+  const poleNumber = String(pole || "").trim();
+  if (latNum === null || lngNum === null) return "";
+  const size = compact ? " small" : "";
+  // Without a pole number there is no context to build, so the location keeps
+  // only the plain pin rather than a button that would export a lone marker.
+  const primary = poleNumber
+    ? `<button type="button" class="btn secondary${size}" data-earth-action="context" data-busy-label="Building KMZ…"`
+      + ` data-earth-pole="${escapeHtml(poleNumber)}" data-earth-lat="${latNum}" data-earth-lng="${lngNum}">Open in Google Earth</button>`
+    : "";
+  return `<div class="earth-actions">${primary}
+    <a class="earth-pin-link" href="${escapeHtml(googleEarthPinUrl(latNum, lngNum))}" target="_blank" rel="noopener noreferrer">Just drop a pin</a>
+  </div>`;
+}
+
+/** One delegated handler for every "Open in Google Earth" button in the app. */
+let _earthActionsBound = false;
+function bindEarthExportActions(){
+  if (_earthActionsBound) return;
+  _earthActionsBound = true;
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-earth-action='context']");
+    if (!button || button.disabled) return;
+    event.preventDefault();
+    const site = getVisibleSites().find((row) => poleNumberFromName(getSiteDisplayName(row)) === button.dataset.earthPole) || null;
+    setButtonBusy(button, true);
+    void openLocationInGoogleEarth({
+      pole: button.dataset.earthPole,
+      lat: button.dataset.earthLat,
+      lng: button.dataset.earthLng,
+      site,
+    }).finally(() => setButtonBusy(button, false));
+  });
+}
+
+SpecCom.earth = {
+  buildContext: buildEarthContext,
+  poleIndex: buildEarthPoleIndex,
+  open: openLocationInGoogleEarth,
 };
 
 /* ==========================================================================
