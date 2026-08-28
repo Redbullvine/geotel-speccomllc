@@ -364,6 +364,45 @@ test("a rejected cable string is recorded on the pole rather than dropped", () =
   assert.match(warnings[0], /XD range "30-48" starts at fiber 30/);
 });
 
+test("a pole carries the coordinates the design recorded for it", () => {
+  // extractTdsDesign() stores a network point's position as `coords`; reading a
+  // flat `lat`/`lng` off the record instead left every pole at null, so nothing
+  // downstream could place a pole on a map.
+  const { poles } = buildSplicePoles({
+    cables: [{ name: "A", startCp: "1", endCp: "2", cableCount: "XD:1-48", laborUnit: "CO(48)(FD)6M" }],
+    cpToNp: { 1: "100", 2: "1748" },
+    networkPoints: [{ np: "1748", type: "Pole", coords: { lat: 33.3672, lng: -105.674 } }],
+    devices: [],
+  });
+  const pole = poles.find((p) => p.id === "1748");
+  assert.equal(pole.lat, 33.3672);
+  assert.equal(pole.lng, -105.674);
+});
+
+test("a hand-built network point may still carry flat lat/lng", () => {
+  const { poles } = buildSplicePoles({
+    cables: [{ name: "A", startCp: "1", endCp: "2", cableCount: "XD:1-48", laborUnit: "CO(48)(FD)6M" }],
+    cpToNp: { 1: "100", 2: "200" },
+    networkPoints: [{ np: "200", type: "Pole", lat: 33.1, lng: -105.1 }],
+    devices: [],
+  });
+  assert.equal(poles.find((p) => p.id === "200").lat, 33.1);
+});
+
+test("an endpoint that is not a network point is flagged, not called a pole", () => {
+  const { poles, warnings } = buildSplicePoles({
+    cables: [{ name: "A", startCp: "1", endCp: "2", cableCount: "XD:1-48", laborUnit: "CO(48)(FD)6M" }],
+    cpToNp: { 1: "1748", 2: "12801" },
+    networkPoints: [{ np: "1748", type: "Pole", coords: { lat: 33.3672, lng: -105.674 } }],
+    devices: [],
+  });
+  assert.equal(poles.find((p) => p.id === "1748").isNetworkPoint, true);
+  assert.equal(poles.find((p) => p.id === "12801").isNetworkPoint, false,
+    "a connectivity point used as an endpoint is not a pole");
+  assert.ok(warnings.some((line) => /12801 .* is not a pole/.test(line)));
+  assert.equal(poles.length, 2, "its cables are still kept, not dropped");
+});
+
 test("a manual pole validates its strings before it is accepted", () => {
   const pole = buildManualPole({
     name: "POLE 1748",

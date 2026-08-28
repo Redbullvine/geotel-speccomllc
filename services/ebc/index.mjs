@@ -47,6 +47,7 @@ export {
   tdsLegToEbcLeg,
   tdsValue,
   tdsIdNumber,
+  tdsDescriptionFields,
 } from "./tdsKmzImport.mjs";
 
 export {

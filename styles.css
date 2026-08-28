@@ -10930,3 +10930,30 @@ table.ebc-compare tr.is-feasible td:first-child{ font-weight:800; }
   .ebc-tabs, .ebc-splice-controls, .ebc-manual, #main-navbar, .mobile-bottom-nav{ display:none !important; }
   .ebc-diagram-host{ border:0; padding:0; overflow:visible; }
 }
+
+/* --------------------------------------------------------------------------
+   Open in Google Earth — context KMZ actions
+   One primary action per location view, with the plain single pin kept as a
+   secondary link for a phone with no Google Earth installed.
+   -------------------------------------------------------------------------- */
+.earth-actions{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:8px;
+}
+.earth-actions .btn{ flex:0 0 auto; }
+.earth-pin-link{
+  font-size:12px;
+  color:var(--muted);
+  text-decoration:underline;
+  white-space:nowrap;
+}
+.earth-pin-link:hover{ color:var(--text); }
+.scSitePopup .earth-actions{ justify-content:flex-start; margin:8px 0 4px; }
+
+@media (max-width: 720px){
+  .earth-actions{ justify-content:flex-start; }
+}

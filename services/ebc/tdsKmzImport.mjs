@@ -49,6 +49,7 @@ export const TDS_FIELDS = Object.freeze({
   connectivityPoint: Object.freeze({
     name: "Connectivity Point Name",
     networkPoint: "Network Point Connectivity Point Is Located At",
+    enclosureUnit: "Enclosure Unit",
   }),
   cable: Object.freeze({
     name: "Cable Name",
@@ -108,6 +109,27 @@ function toNumber(value){
 }
 
 /**
+ * Scrape TDS's two-column attribute table out of a placemark description.
+ *
+ * TDS puts its attributes in an HTML table inside the CDATA description, as
+ * <tr><td>Field</td><td>Value</td></tr>. Exported separately because consumers
+ * that already hold a parsed placemark's description HTML (the map's KMZ layer
+ * rows) need the same field names without re-parsing the whole document.
+ */
+export function tdsDescriptionFields(html){
+  const fields = {};
+  for (const row of String(html || "").matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)){
+    const cells = [...row[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)]
+      .map((cell) => decodeEntities(cell[1].replace(/<[^>]*>/g, "")));
+    if (cells.length !== 2) continue;
+    const key = cells[0];
+    if (!key || key.length > 80) continue;
+    if (fields[key] === undefined) fields[key] = tdsValue(cells[1]);
+  }
+  return fields;
+}
+
+/**
  * Parse every placemark into { fields, point, line }.
  * Field values keep TDS's own names; `tdsValue` has already normalised <Null>.
  */
@@ -123,15 +145,7 @@ export function parseTdsKml(kmlText){
     const chunk = /<tr[^>]*>/.test(rawChunk) || !/&lt;tr/i.test(rawChunk)
       ? rawChunk
       : rawChunk.replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-    const fields = {};
-    for (const row of chunk.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)){
-      const cells = [...row[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)]
-        .map((cell) => decodeEntities(cell[1].replace(/<[^>]*>/g, "")));
-      if (cells.length !== 2) continue;
-      const key = cells[0];
-      if (!key || key.length > 80) continue;
-      if (fields[key] === undefined) fields[key] = tdsValue(cells[1]);
-    }
+    const fields = tdsDescriptionFields(chunk);
     // KML <Data name="x"><value>y</value></Data>, used by analysis overlays.
     for (const data of chunk.matchAll(/<Data name="([^"]+)"[^>]*>\s*<value>([\s\S]*?)<\/value>/g)){
       const key = decodeEntities(data[1]);
@@ -191,12 +205,24 @@ export function extractTdsDesign(kmlText, { project = "", pon = "", node = "" } 
 
   // --- Connectivity point -> network point -------------------------------
   const cpToNp = new Map();
+  const connectivityPoints = [];
   for (const mark of placemarks){
     const cp = mark.fields[C.name];
     const np = mark.fields[C.networkPoint];
     // Device records also carry a Connectivity Point Name; only the
     // connectivity-point records themselves carry the network-point link.
-    if (cp && np && !mark.fields[D.splitterPath]) cpToNp.set(tdsIdNumber(cp), tdsIdNumber(np));
+    if (cp && np && !mark.fields[D.splitterPath]){
+      cpToNp.set(tdsIdNumber(cp), tdsIdNumber(np));
+      connectivityPoints.push({
+        cp: tdsIdNumber(cp),
+        name: cp,
+        np: tdsIdNumber(np),
+        // The splice enclosure at this point. "HAFO(PCOT)LO" with no device in
+        // it is the pass-through / MST-only case.
+        enclosureUnit: mark.fields[C.enclosureUnit] || null,
+        coords: mark.point,
+      });
+    }
   }
 
   // --- Cable graph --------------------------------------------------------
@@ -283,6 +309,31 @@ export function extractTdsDesign(kmlText, { project = "", pon = "", node = "" } 
     });
   }
 
+  // --- Every network device, unfiltered -----------------------------------
+  // devices[] above is the tap cascade, and it requires a Splitter Path. The
+  // export also carries splitters and tap legs that have none, and a consumer
+  // identifying what sits at a pole (the Google Earth context export) needs
+  // those too, so keep the raw list alongside.
+  const allDevices = [];
+  for (const mark of placemarks){
+    if (!mark.fields[D.name]) continue;
+    const cp = tdsIdNumber(mark.fields[D.connectivityPoint]);
+    allDevices.push({
+      deviceName: mark.fields[D.name],
+      deviceType: mark.fields[D.type] || null,
+      materialUnit: mark.fields[D.materialUnit] || null,
+      splitterPath: mark.fields[D.splitterPath] || null,
+      splitterOrder: toNumber(mark.fields[D.splitterOrder]),
+      splitterRatio: toNumber(mark.fields[D.splitterRatio]),
+      tapRatio: mark.fields[D.tapRatio] || null,
+      project: mark.fields[D.project] || null,
+      market: mark.fields[D.market] || null,
+      cp,
+      np: cpToNp.get(cp) || "",
+      coords: mark.point,
+    });
+  }
+
   // Does this export carry ANY optical loss at all?
   const declaredLosses = devices.map((device) => toNumber(device.declaredTapLoss)).filter((value) => value !== null && value !== 0);
   const containsInsertionLoss = declaredLosses.length > 0;
@@ -365,8 +416,10 @@ export function extractTdsDesign(kmlText, { project = "", pon = "", node = "" } 
     projects,
     pons,
     devices,
+    allDevices,
     cables,
     networkPoints: [...networkPoints.values()],
+    connectivityPoints,
     cpToNp: Object.fromEntries(cpToNp),
     legs: [...legs.values()],
     containsInsertionLoss,

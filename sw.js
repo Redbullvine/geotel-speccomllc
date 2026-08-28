@@ -15,6 +15,7 @@ const CRITICAL_ASSETS = [
   "/styles.css?v=20260702-mobile-ui-stabilization",
   "/supabaseClient.js",
   "/services/offlinePhotoQueue.js",
+  "/js/earth-export.js",
   "/env.generated.js",
 ];
 
