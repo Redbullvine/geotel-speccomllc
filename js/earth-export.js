@@ -131,17 +131,41 @@ function deviceTypeNumber(raw){
 }
 
 /**
+ * Separators the field uses between a pole number and its street address:
+ *   "2015 · 103 Klamath Rd", "2015 - 103 Klamath Rd", "2015: 103 Klamath Rd"
+ */
+const POLE_LABEL_SPLIT = /^(\d{2,})\s*[·•\-–—:|,]\s*(\S.*)$/;
+
+/**
+ * Split a field label into its pole number and the rest.
+ *
+ * The staking sheets and the engineer's own Earth project name a location
+ * "2015 · 103 Klamath Rd", so a name in that shape yields both halves. Anything
+ * else yields no address — the remainder of a name is only treated as a street
+ * address when the number/separator shape says so.
+ */
+export function splitPoleLabel(name){
+  const text = String(name ?? "").trim();
+  const match = POLE_LABEL_SPLIT.exec(text);
+  if (!match) return { pole: poleNumberFromName(text), address: "" };
+  return { pole: match[1], address: match[2].trim() };
+}
+
+/**
  * Pole number from a name.
- *   "RuidosoNetworkPoint-1654" -> "1654"
- *   "POLE 1748"                -> "1748"
- * A name with several digit runs and no trailing run is not guessed at; it
- * resolves only when exactly one run exists.
+ *   "RuidosoNetworkPoint-1654"  -> "1654"   trailing run
+ *   "POLE 1748"                 -> "1748"   trailing run
+ *   "2015 · 103 Klamath Rd"     -> "2015"   leads the label, address follows
+ *   "MST-3 / East Pedestal"     -> "3"      the only run in the name
+ *   "MST-3 near 1748 pole A"    -> ""       ambiguous, so not guessed at
  */
 export function poleNumberFromName(name){
   const text = String(name ?? "").trim();
   if (!text) return "";
   const trailing = /(\d+)\s*$/.exec(text);
   if (trailing) return trailing[1];
+  const leading = POLE_LABEL_SPLIT.exec(text);
+  if (leading) return leading[1];
   const runs = text.match(/\d+/g) || [];
   return runs.length === 1 ? runs[0] : "";
 }

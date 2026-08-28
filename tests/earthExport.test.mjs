@@ -18,6 +18,7 @@ import {
   resolveDeviceType,
   resolveLocationType,
   selectReferencePoles,
+  splitPoleLabel,
 } from "../js/earth-export.js";
 import { extractTdsDesign } from "../services/ebc/tdsKmzImport.mjs";
 
@@ -530,4 +531,32 @@ test("the project layer refuses an empty or coordinate-less set", () => {
 test("the project file name follows TE_<project>_AllPoles.kmz", () => {
   assert.equal(earthProjectKmzFileName({ projectSlug: "ruidoso" }), "TE_ruidoso_AllPoles.kmz");
   assert.equal(earthProjectKmzFileName({}), "TE_project_AllPoles.kmz");
+});
+
+/* -- field labels: "2015 · 103 Klamath Rd" --------------------------------- */
+
+test("a field label yields both the pole number and the address", () => {
+  assert.deepEqual(splitPoleLabel("2015 · 103 Klamath Rd"), { pole: "2015", address: "103 Klamath Rd" });
+  assert.deepEqual(splitPoleLabel("2017 - 203 Klamath Rd"), { pole: "2017", address: "203 Klamath Rd" });
+  assert.deepEqual(splitPoleLabel("13308: 202 Angeles Dr"), { pole: "13308", address: "202 Angeles Dr" });
+});
+
+test("a number leading a field label is the pole, not the house number", () => {
+  // "103 Klamath Rd" has no trailing run, so without the leading rule the whole
+  // label would resolve to nothing and the export button would never appear.
+  assert.equal(poleNumberFromName("2015 · 103 Klamath Rd"), "2015");
+  assert.equal(poleNumberFromName("2105 · 206 Angeles Dr"), "2105");
+});
+
+test("a name that is not number-then-address yields no address", () => {
+  assert.deepEqual(splitPoleLabel("RuidosoNetworkPoint-1654"), { pole: "1654", address: "" });
+  assert.deepEqual(splitPoleLabel("POLE 1748"), { pole: "1748", address: "" });
+  assert.deepEqual(splitPoleLabel("MST-3 near 1748 pole A"), { pole: "", address: "" });
+  assert.deepEqual(splitPoleLabel(""), { pole: "", address: "" });
+});
+
+test("the existing name shapes still resolve the way they did", () => {
+  assert.equal(poleNumberFromName("RuidosoNetworkPoint-1654"), "1654");
+  assert.equal(poleNumberFromName("MST-3 / East Pedestal"), "3");
+  assert.equal(poleNumberFromName("MST-3 near 1748 pole A"), "");
 });

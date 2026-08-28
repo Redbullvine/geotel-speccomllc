@@ -99,9 +99,9 @@ import {
   earthKmzFileName,
   earthProjectKmzFileName,
   earthStyleFor,
-  poleNumberFromName,
   resolveLocationType,
   selectReferencePoles,
+  splitPoleLabel,
 } from "./js/earth-export.js";
 
 const isDebug = new URLSearchParams(location.search).has("debug");
@@ -6473,7 +6473,7 @@ function buildSiteMarkerPopupHtml(site, {
   // Context KMZ for this pole: the target, its neighbours and the legend, not
   // a bare pin. The plain pin stays as the fallback when Earth is not installed.
   const earthHtml = coords
-    ? renderEarthActions({ pole: poleNumberFromName(locationName), lat: coords.lat, lng: coords.lng, compact: true })
+    ? renderEarthActions({ pole: splitPoleLabel(locationName).pole, lat: coords.lat, lng: coords.lng, compact: true })
     : "";
   return `
     <div class="scSitePopup" data-popup-site-id="${escapeHtml(siteId)}">
@@ -31254,7 +31254,7 @@ function renderLocations(){
       ? `<button class="btn ghost small" data-action="openFiberEngineer" data-pole="${escapeHtml(String(r.name || r.id || ""))}">Open in Fiber Engineer</button>`
       : "";
     const earthBtn = renderEarthActions({
-      pole: poleNumberFromName(r.name || displayName),
+      pole: splitPoleLabel(r.name || displayName).pole,
       lat: r.gps?.lat,
       lng: r.gps?.lng,
       compact: true,
@@ -43325,13 +43325,36 @@ const EARTH_ADDRESS_FIELDS = Object.freeze([
   "Service Location Address",
 ]);
 
-/** Street address for a KMZ row, from the KML <address> element or a TDS field. */
+/**
+ * Attribute names that contain the word "address" but hold something else, and
+ * values that are a flag rather than a place.
+ */
+const EARTH_NOT_ADDRESS_FIELD = /\b(mac|ip|ipv4|ipv6|email|e-mail|url)\b/i;
+const EARTH_FLAG_VALUE = /^(y|n|yes|no|true|false|0|1)$/i;
+
+/**
+ * Street address for a KMZ row.
+ *
+ * The KML <address> element first, then the named TDS attributes above, then
+ * any attribute whose own name says "address" — exports differ in what they
+ * call the column, and matching on the field name is still a lookup, not a
+ * guess at the value. Flags such as "Address Verified: Y" are rejected.
+ */
 function earthAddressFrom(row, fields){
   const direct = String(row?.__address || "").trim();
   if (direct) return direct;
+  const usable = (value) => {
+    const text = String(value || "").trim();
+    return text && !EARTH_FLAG_VALUE.test(text) ? text : "";
+  };
   for (const name of EARTH_ADDRESS_FIELDS){
-    const value = String(fields?.[name] || "").trim();
+    const value = usable(fields?.[name]);
     if (value) return value;
+  }
+  for (const [name, value] of Object.entries(fields || {})){
+    if (!/address/i.test(name) || EARTH_NOT_ADDRESS_FIELD.test(name)) continue;
+    const text = usable(value);
+    if (text) return text;
   }
   return "";
 }
@@ -43466,11 +43489,15 @@ function buildEarthPoleIndex(){
   }
 
   // --- 3. The project's pinned sites -------------------------------------
+  // Field names are written "2015 · 103 Klamath Rd", so the site name carries
+  // the pole number and the street address together.
   for (const site of getVisibleSites()){
-    const entry = entryFor(poleNumberFromName(getSiteDisplayName(site)));
+    const { pole, address } = splitPoleLabel(getSiteDisplayName(site));
+    const entry = entryFor(pole);
     if (!entry) continue;
     const coords = getSiteCoords(site);
     setCoords(entry, coords?.lat, coords?.lng);
+    if (!entry.address && address) entry.address = address;
   }
 
   for (const entry of index.values()){
@@ -43716,7 +43743,7 @@ function bindEarthExportActions(){
     const button = event.target.closest?.("[data-earth-action='context']");
     if (!button || button.disabled) return;
     event.preventDefault();
-    const site = getVisibleSites().find((row) => poleNumberFromName(getSiteDisplayName(row)) === button.dataset.earthPole) || null;
+    const site = getVisibleSites().find((row) => splitPoleLabel(getSiteDisplayName(row)).pole === button.dataset.earthPole) || null;
     setButtonBusy(button, true);
     void openLocationInGoogleEarth({
       pole: button.dataset.earthPole,
